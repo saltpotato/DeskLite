@@ -46,6 +46,33 @@ def remember_partner(cfg, partner_id, password):
     cfg["recent_partners"] = recent[:8]
     save_config(cfg)
 
+def is_admin():
+    """Checks whether the current process has administrator privileges."""
+    if sys.platform != "win32":
+        return True
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        return False
+
+def restart_as_admin():
+    """Relaunches the current process with elevated administrator rights via UAC."""
+    if sys.platform == "win32":
+        try:
+            if getattr(sys, "frozen", False):
+                exe = sys.executable
+                params = ""
+            else:
+                exe = sys.executable
+                params = f'"{os.path.abspath(sys.argv[0])}"'
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", exe, params, None, 1
+            )
+            sys.exit(0)
+        except Exception:
+            return False
+    return False
+
 def ensure_desktop_access():
     """Ensures thread has access to active Windows desktop station."""
     if sys.platform == "win32":

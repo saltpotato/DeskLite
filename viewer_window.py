@@ -66,6 +66,10 @@ class RemoteDesktopViewer(tk.Toplevel):
                                         relief=tk.FLAT, font=("Segoe UI", 8), command=self.toggle_fullscreen)
         self.btn_fullscreen.pack(side=tk.RIGHT, padx=4, pady=4)
 
+        self.btn_desktop = tk.Button(self.toolbar, text="🖥️ Desktop", bg="#34495e", fg="white",
+                                     relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.send_shortcut("desktop"))
+        self.btn_desktop.pack(side=tk.RIGHT, padx=3, pady=4)
+
         self.btn_task_mgr = tk.Button(self.toolbar, text="⚙️ Taskmgr", bg="#34495e", fg="white",
                                       relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.send_shortcut("task_manager"))
         self.btn_task_mgr.pack(side=tk.RIGHT, padx=3, pady=4)
@@ -83,16 +87,16 @@ class RemoteDesktopViewer(tk.Toplevel):
         self.btn_ctrl_alt_del.pack(side=tk.RIGHT, padx=3, pady=4)
 
         self.btn_hq = tk.Button(self.toolbar, text="💎 HQ", bg="#8e44ad", fg="white",
-                                relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.set_quality(75, 1.0))
+                                relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.set_quality(85, 1.0))
         self.btn_hq.pack(side=tk.RIGHT, padx=3, pady=4)
 
         self.btn_balanced = tk.Button(self.toolbar, text="⚖️ Normal", bg="#2980b9", fg="white",
-                                      relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.set_quality(60, 0.75))
+                                      relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.set_quality(75, 1.0))
         self.btn_balanced.pack(side=tk.RIGHT, padx=3, pady=4)
 
-        self.btn_turbo = tk.Button(self.toolbar, text="🚀 Turbo", bg="#27ae60", fg="white",
-                                   relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.set_quality(45, 0.60))
-        self.btn_turbo.pack(side=tk.RIGHT, padx=3, pady=4)
+        self.btn_fast = tk.Button(self.toolbar, text="🚀 Schnell", bg="#27ae60", fg="white",
+                                  relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.set_quality(65, 1.0))
+        self.btn_fast.pack(side=tk.RIGHT, padx=3, pady=4)
 
         # Canvas with hardware cursor enabled (0ms lag!)
         self.canvas = tk.Canvas(self, bg="black", highlightthickness=0, cursor="arrow")

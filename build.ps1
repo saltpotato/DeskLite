@@ -10,7 +10,7 @@ if (Test-Path config.json) {
 "DEFAULT_RELAY = `"$relay`"" | Out-File -Encoding utf8 build_config.py
 Write-Host "Baking relay server into EXE: $relay"
 
-pyinstaller --noconfirm --onefile --windowed --name "RustDeskLight" --hidden-import build_config main.py
+pyinstaller --noconfirm --onefile --windowed --name "RustDeskLight" --hidden-import build_config --uac-admin main.py
 
 New-Item -ItemType Directory -Force server/web/download | Out-Null
 Copy-Item dist/RustDeskLight.exe server/web/download/RustDeskLight.exe -Force

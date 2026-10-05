@@ -7,7 +7,8 @@ from viewer_window import RemoteDesktopViewer
 class RustDeskLightApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("RustDesk Light - Remote Desktop")
+        is_adm = common.is_admin()
+        self.root.title(f"RustDesk Light {'[Administrator]' if is_adm else ''} - Remote Desktop")
         self.root.resizable(False, False)
         
         self.config = common.load_config()
@@ -47,7 +48,10 @@ class RustDeskLightApp:
 
     def _build_ui(self):
         # Header banner
-        header = ttk.Label(self.root, text="⚡ RustDesk Light", style="Header.TLabel")
+        header_text = "⚡ RustDesk Light"
+        if common.is_admin():
+            header_text += " [Administrator]"
+        header = ttk.Label(self.root, text=header_text, style="Header.TLabel")
         header.pack(pady=(16, 12))
 
         # Main 2-column container
@@ -112,7 +116,7 @@ class RustDeskLightApp:
         server_row.pack(fill=tk.X, pady=(0, 6))
 
         ttk.Label(server_row, text="Relay-Server:").pack(side=tk.LEFT)
-        self.entry_server = ttk.Entry(server_row, width=26)
+        self.entry_server = ttk.Entry(server_row, width=22)
         self.entry_server.insert(0, self.config.get("relay_server", "ws://localhost:8765"))
         self.entry_server.pack(side=tk.LEFT, padx=6)
 
@@ -120,16 +124,20 @@ class RustDeskLightApp:
         btn_save_server.pack(side=tk.LEFT, padx=(0, 8))
 
         ttk.Label(server_row, text="Profil:").pack(side=tk.LEFT)
-        self.combo_mode = ttk.Combobox(server_row, values=["🚀 Turbo", "⚖️ Normal", "💎 HQ"], state="readonly", width=10)
-        curr_scale = self.config.get("scale", 0.75)
-        if curr_scale <= 0.65:
+        self.combo_mode = ttk.Combobox(server_row, values=["🚀 Schnell", "⚖️ Normal", "💎 HQ"], state="readonly", width=10)
+        curr_q = self.config.get("quality", 75)
+        if curr_q <= 65:
             self.combo_mode.current(0)
-        elif curr_scale >= 0.95:
+        elif curr_q >= 85:
             self.combo_mode.current(2)
         else:
             self.combo_mode.current(1)
         self.combo_mode.pack(side=tk.LEFT, padx=6)
         self.combo_mode.bind("<<ComboboxSelected>>", self.on_mode_change)
+
+        if not common.is_admin():
+            btn_admin = ttk.Button(server_row, text="🛡️ Als Admin ausführen", command=common.restart_as_admin)
+            btn_admin.pack(side=tk.RIGHT, padx=4)
 
         # Status text
         self.lbl_status = ttk.Label(bottom_frame, text="🟡 Initialisiere...", style="Status.TLabel")
@@ -143,9 +151,9 @@ class RustDeskLightApp:
             relay_url=self.config.get("relay_server", "ws://localhost:8765"),
             my_id=self.config.get("my_id"),
             my_password=self.config.get("my_password"),
-            quality=self.config.get("quality", 60),
+            quality=self.config.get("quality", 75),
             max_fps=self.config.get("max_fps", 30),
-            scale=self.config.get("scale", 0.85),
+            scale=self.config.get("scale", 1.0),
             status_callback=self.on_host_status
         )
         self.host_service.start()
@@ -193,15 +201,15 @@ class RustDeskLightApp:
 
     def on_mode_change(self, event=None):
         val = self.combo_mode.get()
-        if "Turbo" in val:
-            self.config["quality"] = 45
-            self.config["scale"] = 0.60
+        if "Schnell" in val or "Turbo" in val:
+            self.config["quality"] = 65
+            self.config["scale"] = 1.0  # Crisp text, never downscale!
         elif "HQ" in val:
-            self.config["quality"] = 75
+            self.config["quality"] = 85
             self.config["scale"] = 1.0
         else:
-            self.config["quality"] = 60
-            self.config["scale"] = 0.75
+            self.config["quality"] = 75
+            self.config["scale"] = 1.0
         common.save_config(self.config)
         if self.host_service:
             self.host_service.capturer.update_settings(quality=self.config["quality"], scale=self.config["scale"])

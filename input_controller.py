@@ -101,6 +101,12 @@ class InputController:
             if name == "win_key":
                 self.keyboard.press(Key.cmd)
                 self.keyboard.release(Key.cmd)
+            elif name == "desktop":
+                # Minimize / Show Desktop (Win+D)
+                self.keyboard.press(Key.cmd)
+                self.keyboard.press('d')
+                self.keyboard.release('d')
+                self.keyboard.release(Key.cmd)
             elif name == "explorer":
                 self.keyboard.press(Key.cmd)
                 self.keyboard.press('e')
