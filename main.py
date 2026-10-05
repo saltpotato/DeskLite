@@ -138,6 +138,10 @@ class RustDeskLightApp:
         if not common.is_admin():
             btn_admin = ttk.Button(server_row, text="🛡️ Als Admin ausführen", command=common.restart_as_admin)
             btn_admin.pack(side=tk.RIGHT, padx=4)
+        else:
+            if common.get_uac_secure_desktop():
+                self.btn_uac = ttk.Button(server_row, text="🛡️ UAC-Freigabe", command=self.enable_uac_remote)
+                self.btn_uac.pack(side=tk.RIGHT, padx=4)
 
         # Status text
         self.lbl_status = ttk.Label(bottom_frame, text="🟡 Initialisiere...", style="Status.TLabel")
@@ -213,6 +217,14 @@ class RustDeskLightApp:
         common.save_config(self.config)
         if self.host_service:
             self.host_service.capturer.update_settings(quality=self.config["quality"], scale=self.config["scale"])
+
+    def enable_uac_remote(self):
+        if common.set_uac_secure_desktop(False):
+            messagebox.showinfo("UAC-Fernsteuerung aktiv", "Erfolgreich! UAC-Dialoge (Ja/Nein) erscheinen ab sofort auf dem Desktop und können aus der Ferne gesteuert werden.")
+            if hasattr(self, "btn_uac"):
+                self.btn_uac.config(text="✅ UAC aktiv", state="disabled")
+        else:
+            messagebox.showerror("Fehler", "Konnte UAC-Einstellung nicht ändern (Administrator-Rechte erforderlich).")
 
     def on_partner_selected(self, event=None):
         pid = self.entry_partner_id.get().strip()

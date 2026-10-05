@@ -139,6 +139,32 @@ def set_clipboard_text(text):
     except Exception:
         return False
 
+def get_uac_secure_desktop():
+    """Returns True if Secure Desktop is enabled for UAC prompts."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", 0, winreg.KEY_READ)
+        val, _ = winreg.QueryValueEx(key, "PromptOnSecureDesktop")
+        winreg.CloseKey(key)
+        return val != 0
+    except Exception:
+        return True
+
+def set_uac_secure_desktop(enabled):
+    """Enables or disables Secure Desktop for UAC prompts (requires Admin)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", 0, winreg.KEY_SET_VALUE)
+        winreg.SetValueEx(key, "PromptOnSecureDesktop", 0, winreg.REG_DWORD, 1 if enabled else 0)
+        winreg.CloseKey(key)
+        return True
+    except Exception:
+        return False
+
 def ensure_desktop_access():
     """Ensures thread has access to active Windows desktop station."""
     if sys.platform == "win32":
