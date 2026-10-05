@@ -1,0 +1,30 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller / Build outputs
+build/
+dist/
+*.spec
+
+# Large binaries (downloads hosted on server)
+server/web/download/*.exe
+server/web/download/*.zip
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Local configuration (contains personal server address and IDs)
+config.json
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+
+# OS generated
+Thumbs.db
+Desktop.ini

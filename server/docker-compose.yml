@@ -1,0 +1,11 @@
+services:
+  relay-server:
+    build: .
+    container_name: remotedesktop-relay
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      - PORT=8765
+    volumes:
+      - ./web:/app/web:ro

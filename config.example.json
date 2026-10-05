@@ -1,0 +1,8 @@
+{
+  "relay_server": "ws://localhost:8765",
+  "my_id": "123 456",
+  "my_password": "secret",
+  "quality": 60,
+  "max_fps": 30,
+  "scale": 0.85
+}
