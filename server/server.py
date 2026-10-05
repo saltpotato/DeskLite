@@ -84,6 +84,7 @@ async def handle_websocket(websocket):
     try:
         # First message must be registration or connection request
         first_msg = await websocket.recv()
+        logging.info(f"[WS-IN] Erste Nachricht: {first_msg}")
         data = json.loads(first_msg)
         action = data.get("action")
         raw_id = str(data.get("id", "")).replace(" ", "").strip()
@@ -119,13 +120,16 @@ async def handle_websocket(websocket):
             # VIEWER connecting to host
             role = "viewer"
             target_id = str(data.get("target_id", "")).replace(" ", "").strip()
+            logging.info(f"[?] Viewer will verbinden mit '{target_id}'. Registrierte Hosts: {list(hosts.keys())}")
 
             if target_id not in hosts:
+                logging.info(f"[-] Host '{target_id}' nicht online")
                 await websocket.send(json.dumps({"status": "error", "message": f"Host '{target_id}' ist nicht online."}))
                 return
 
             expected_pwd = peer_auth.get(target_id, "")
             if expected_pwd and pwd != expected_pwd:
+                logging.info(f"[-] Falsches Passwort für Host '{target_id}' (erwartet: '{expected_pwd}', erhalten: '{pwd}')")
                 await websocket.send(json.dumps({"status": "error", "message": "Falsches Passwort."}))
                 return
 
@@ -151,10 +155,10 @@ async def handle_websocket(websocket):
                     except Exception:
                         break
 
-    except websockets.exceptions.ConnectionClosed:
-        pass
+    except websockets.exceptions.ConnectionClosed as e:
+        logging.info(f"[WS-CLOSED] Role '{role}', Peer '{peer_id}': code={e.code}, reason={e.reason}")
     except Exception as e:
-        logging.warning(f"Fehler: {e}")
+        logging.exception(f"[WS-ERR] Fehler bei Peer '{peer_id}': {e}")
     finally:
         if role == "host" and peer_id in hosts:
             if hosts[peer_id] == websocket:

@@ -14,5 +14,7 @@ pyinstaller --noconfirm --onefile --windowed --name "RustDeskLight" --hidden-imp
 
 New-Item -ItemType Directory -Force server/web/download | Out-Null
 Copy-Item dist/RustDeskLight.exe server/web/download/RustDeskLight.exe -Force
-Compress-Archive -Force -Path dist/RustDeskLight.exe, start_app.bat, README.md -DestinationPath server/web/download/RustDeskLight-Client.zip
-Write-Host "Done: server/web/download/"
+if (Test-Path server/web/download/RustDeskLight-Client.zip) {
+    Remove-Item server/web/download/RustDeskLight-Client.zip -Force
+}
+Write-Host "Done: server/web/download/RustDeskLight.exe"
