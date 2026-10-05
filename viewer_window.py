@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import messagebox
 import websockets
 from PIL import Image, ImageTk
+from common import get_clipboard_text, set_clipboard_text
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [VIEWER] %(message)s")
 
@@ -44,6 +45,7 @@ class RemoteDesktopViewer(tk.Toplevel):
         self.fps_timer = time.time()
         self.fps_display = 0
         self.last_mouse_time = 0
+        self.last_clipboard = ""
 
         self._build_ui()
         self._bind_events()
@@ -70,7 +72,9 @@ class RemoteDesktopViewer(tk.Toplevel):
                                      relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.send_shortcut("desktop"))
         self.btn_desktop.pack(side=tk.RIGHT, padx=3, pady=4)
 
-
+        self.btn_clip = tk.Button(self.toolbar, text="📋 Einfügen", bg="#34495e", fg="white",
+                                  relief=tk.FLAT, font=("Segoe UI", 8), command=self.send_clipboard_to_host)
+        self.btn_clip.pack(side=tk.RIGHT, padx=3, pady=4)
         self.btn_explorer = tk.Button(self.toolbar, text="📁 Explorer", bg="#34495e", fg="white",
                                       relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.send_shortcut("explorer"))
         self.btn_explorer.pack(side=tk.RIGHT, padx=3, pady=4)
@@ -123,6 +127,7 @@ class RemoteDesktopViewer(tk.Toplevel):
         self.bind("<KeyPress>", self.on_key_press)
         self.bind("<KeyRelease>", self.on_key_release)
         self.bind("<F11>", lambda e: self.toggle_fullscreen())
+        self.bind("<FocusIn>", lambda e: self._check_clipboard_sync())
 
     def toggle_fullscreen(self):
         is_fs = self.attributes("-fullscreen")
@@ -130,6 +135,19 @@ class RemoteDesktopViewer(tk.Toplevel):
 
     def send_shortcut(self, name):
         self.send_input({"event": "shortcut", "name": name})
+
+    def send_clipboard_to_host(self):
+        text = get_clipboard_text()
+        if text and self.ws and self.loop and self.loop.is_running():
+            self.last_clipboard = text
+            msg = json.dumps({"type": "clipboard", "text": text})
+            asyncio.run_coroutine_threadsafe(self._ws_send(msg), self.loop)
+            self.status_label.config(text="📋 Zwischenablage an Host gesendet")
+
+    def _check_clipboard_sync(self):
+        cur = get_clipboard_text()
+        if cur and cur != self.last_clipboard and len(cur) < 500000:
+            self.send_clipboard_to_host()
 
     def send_ctrl_alt_del(self):
         self.send_input({"event": "key_down", "key": "ctrl"})
@@ -265,6 +283,12 @@ class RemoteDesktopViewer(tk.Toplevel):
                             elif meta.get("type") == "host_disconnected":
                                 self.after(0, lambda: self.status_label.config(text="🟡 Host kurz getrennt – warte auf Wiederverbindung..."))
                                 break
+                            elif meta.get("type") == "clipboard":
+                                text = meta.get("text", "")
+                                if text and text != self.last_clipboard:
+                                    self.last_clipboard = text
+                                    set_clipboard_text(text)
+                                    self.after(0, lambda: self.status_label.config(text="📋 Zwischenablage vom Host übernommen"))
                         except Exception:
                             pass
         except Exception:

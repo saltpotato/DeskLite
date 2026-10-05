@@ -105,6 +105,7 @@
         <button type="button" onclick="setQuality(85, 1.0)" style="background:#7c3aed; padding:4px 8px; font-size:11px;" title="Maximale Details & Farben">💎 HQ</button>
         <div style="height: 20px; width: 1px; background: #444; margin: 0 4px;"></div>
         <button type="button" onclick="sendShortcut('desktop')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Desktop anzeigen / Alle Fenster minimieren (Win+D)">🖥️ Desktop</button>
+        <button type="button" onclick="sendClipboard()" style="background:#374151; padding:4px 8px; font-size:11px;" title="Lokale Zwischenablage an entfernten PC senden">📋 Einfügen</button>
         <button type="button" onclick="sendShortcut('win_key')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Startmenü öffnen">🪟 Start</button>
         <button type="button" onclick="sendShortcut('explorer')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Windows Explorer öffnen">📁 Explorer</button>
       </div>
@@ -286,6 +287,29 @@
       }
     }
 
+    async function sendClipboard() {
+      if (!ws || !isConnected) return;
+      try {
+        let text = "";
+        if (navigator.clipboard && navigator.clipboard.readText) {
+          text = await navigator.clipboard.readText();
+        }
+        if (!text) {
+          text = prompt("Text zum Einfügen auf dem entfernten PC:");
+        }
+        if (text) {
+          ws.send(JSON.stringify({ type: "clipboard", text: text }));
+          setStatus("📋 Zwischenablage an Host gesendet", "green");
+        }
+      } catch(e) {
+        let text = prompt("Text zum Einfügen auf dem entfernten PC:");
+        if (text && ws && isConnected) {
+          ws.send(JSON.stringify({ type: "clipboard", text: text }));
+          setStatus("📋 Zwischenablage an Host gesendet", "green");
+        }
+      }
+    }
+
     function connect() {
       const targetId = document.getElementById("targetId").value.trim();
       const pwd = document.getElementById("targetPwd").value.trim();
@@ -342,6 +366,13 @@
               canvas.height = remoteHeight;
             } else if (msg.type === "host_disconnected") {
               setStatus("Host getrennt – warte auf Wiederverbindung...", "yellow");
+            } else if (msg.type === "clipboard") {
+              if (msg.text) {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                  navigator.clipboard.writeText(msg.text).catch(() => {});
+                }
+                setStatus("📋 Zwischenablage vom Host übernommen", "green");
+              }
             }
           } catch(e) {}
         } else if (evt.data instanceof Blob) {
@@ -453,6 +484,16 @@
         type: "input",
         data: { event: "key_up", key: e.key, char: e.key.length === 1 ? e.key : "" }
       }));
+    });
+
+    window.addEventListener("paste", (e) => {
+      if (!isConnected || !ws) return;
+      if (e.target.tagName === "INPUT") return;
+      const text = (e.clipboardData || window.clipboardData).getData("text");
+      if (text) {
+        ws.send(JSON.stringify({ type: "clipboard", text: text }));
+        setStatus("📋 Zwischenablage an Host gesendet", "green");
+      }
     });
   </script>
 </body>

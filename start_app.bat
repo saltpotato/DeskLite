@@ -7,6 +7,11 @@ if exist "RustDeskLight.exe" (
     exit /b
 )
 
+if exist "%~dp0dist_build\RustDeskLight.exe" (
+    start "" "%~dp0dist_build\RustDeskLight.exe"
+    exit /b
+)
+
 if exist "%~dp0dist\RustDeskLight.exe" (
     start "" "%~dp0dist\RustDeskLight.exe"
     exit /b

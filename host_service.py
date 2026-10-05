@@ -6,6 +6,7 @@ import time
 import websockets
 from capturer import ScreenCapturer
 from input_controller import InputController
+from common import get_clipboard_text, set_clipboard_text
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [HOST] %(message)s")
 
@@ -22,6 +23,7 @@ class HostService:
         self.running = False
         self.active_viewers = 0
         self.force_frame = False
+        self.last_clipboard = ""
         self.thread = None
         self.loop = None
         
@@ -88,6 +90,17 @@ class HostService:
             else:
                 await asyncio.sleep(0.001)
 
+    async def _sync_clipboard(self, ws):
+        while self.running and self.active_viewers > 0:
+            try:
+                cur = get_clipboard_text()
+                if cur and cur != self.last_clipboard and len(cur) < 500000:
+                    self.last_clipboard = cur
+                    await ws.send(json.dumps({"type": "clipboard", "text": cur}))
+            except Exception:
+                pass
+            await asyncio.sleep(0.8)
+
     async def _connect_and_serve(self):
         self.set_status("connecting", "Verbinde mit Relay-Server...")
         async with websockets.connect(
@@ -115,6 +128,7 @@ class HostService:
             self.set_status("online", f"Bereit für Verbindungen (ID: {self.my_id})")
 
             stream_task = None
+            clip_task = None
 
             async for message in ws:
                 if isinstance(message, str):
@@ -138,6 +152,10 @@ class HostService:
                             if stream_task is None or stream_task.done():
                                 stream_task = asyncio.create_task(self._stream_frames(ws))
 
+                            # Start clipboard synchronization
+                            if clip_task is None or clip_task.done():
+                                clip_task = asyncio.create_task(self._sync_clipboard(ws))
+
                         elif msg_type == "viewer_disconnected":
                             self.active_viewers = max(0, self.active_viewers - 1)
                             logging.info(f"Viewer getrennt. Aktive Viewer: {self.active_viewers}")
@@ -145,6 +163,15 @@ class HostService:
                                 self.set_status("online", f"Bereit für Verbindungen (ID: {self.my_id})")
                                 if stream_task and not stream_task.done():
                                     stream_task.cancel()
+                                if clip_task and not clip_task.done():
+                                    clip_task.cancel()
+
+                        elif msg_type == "clipboard":
+                            text = data.get("text", "")
+                            if text and text != self.last_clipboard:
+                                self.last_clipboard = text
+                                set_clipboard_text(text)
+                                logging.info("Zwischenablage vom Viewer übernommen.")
 
                         elif msg_type == "input":
                             evt_data = data.get("data", {})

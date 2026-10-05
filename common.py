@@ -73,6 +73,72 @@ def restart_as_admin():
             return False
     return False
 
+def get_clipboard_text():
+    """Reads unicode text from Windows clipboard."""
+    if sys.platform != "win32":
+        return ""
+    try:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+        user32.GetClipboardData.argtypes = [ctypes.c_uint]
+        user32.GetClipboardData.restype = ctypes.c_void_p
+        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+
+        if not user32.OpenClipboard(None):
+            return ""
+        CF_UNICODETEXT = 13
+        h_read = user32.GetClipboardData(CF_UNICODETEXT)
+        text = ""
+        if h_read:
+            p_read = kernel32.GlobalLock(h_read)
+            if p_read:
+                text = ctypes.c_wchar_p(p_read).value or ""
+                kernel32.GlobalUnlock(h_read)
+        user32.CloseClipboard()
+        return text
+    except Exception:
+        return ""
+
+def set_clipboard_text(text):
+    """Sets unicode text into Windows clipboard."""
+    if sys.platform != "win32" or text is None:
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+        kernel32.GlobalAlloc.restype = ctypes.c_void_p
+        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+        user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        user32.SetClipboardData.restype = ctypes.c_void_p
+
+        CF_UNICODETEXT = 13
+        GMEM_MOVEABLE = 0x0002
+        raw = (text + '\0').encode('utf-16le')
+        h_mem = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(raw))
+        if not h_mem:
+            return False
+        p_mem = kernel32.GlobalLock(h_mem)
+        if not p_mem:
+            return False
+        ctypes.memmove(p_mem, raw, len(raw))
+        kernel32.GlobalUnlock(h_mem)
+
+        if not user32.OpenClipboard(None):
+            return False
+        user32.EmptyClipboard()
+        user32.SetClipboardData(CF_UNICODETEXT, h_mem)
+        user32.CloseClipboard()
+        return True
+    except Exception:
+        return False
+
 def ensure_desktop_access():
     """Ensures thread has access to active Windows desktop station."""
     if sys.platform == "win32":
