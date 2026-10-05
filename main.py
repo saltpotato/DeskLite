@@ -8,7 +8,6 @@ class RustDeskLightApp:
     def __init__(self, root):
         self.root = root
         self.root.title("RustDesk Light - Remote Desktop")
-        self.root.geometry("680x480")
         self.root.resizable(False, False)
         
         self.config = common.load_config()
@@ -86,14 +85,21 @@ class RustDeskLightApp:
         ttk.Label(right_card, text="Partner steuern", style="Title.TLabel").pack(anchor=tk.W, pady=(0, 12))
         
         ttk.Label(right_card, text="Partner-ID eingeben:", style="CardLabel.TLabel").pack(anchor=tk.W, pady=(0, 4))
-        self.entry_partner_id = ttk.Entry(right_card, font=("Consolas", 14), width=18)
+        recent_ids = [p["id"] for p in self.config.get("recent_partners", [])]
+        self.entry_partner_id = ttk.Combobox(right_card, font=("Consolas", 14), width=17, values=recent_ids)
         self.entry_partner_id.pack(anchor=tk.W, pady=(0, 12))
         self.entry_partner_id.bind("<Return>", lambda e: self.connect_partner())
+        self.entry_partner_id.bind("<<ComboboxSelected>>", self.on_partner_selected)
 
         ttk.Label(right_card, text="Partner-Passwort (falls gesetzt):", style="CardLabel.TLabel").pack(anchor=tk.W, pady=(0, 4))
         self.entry_partner_pw = ttk.Entry(right_card, font=("Segoe UI", 11), width=18, show="*")
         self.entry_partner_pw.pack(anchor=tk.W, pady=(0, 16))
         self.entry_partner_pw.bind("<Return>", lambda e: self.connect_partner())
+
+        # Prefill last partner
+        if recent_ids:
+            self.entry_partner_id.current(0)
+            self.on_partner_selected()
 
         btn_connect = ttk.Button(right_card, text="🚀 Verbinden", style="Primary.TButton", command=self.connect_partner)
         btn_connect.pack(anchor=tk.W, ipady=4, fill=tk.X)
@@ -200,6 +206,14 @@ class RustDeskLightApp:
         if self.host_service:
             self.host_service.capturer.update_settings(quality=self.config["quality"], scale=self.config["scale"])
 
+    def on_partner_selected(self, event=None):
+        pid = self.entry_partner_id.get().strip()
+        for p in self.config.get("recent_partners", []):
+            if p.get("id") == pid:
+                self.entry_partner_pw.delete(0, tk.END)
+                self.entry_partner_pw.insert(0, p.get("password", ""))
+                break
+
     def connect_partner(self):
         partner_id = self.entry_partner_id.get().strip()
         partner_pw = self.entry_partner_pw.get().strip()
@@ -207,6 +221,9 @@ class RustDeskLightApp:
         if not partner_id:
             messagebox.showwarning("Eingabe fehlt", "Bitte gib eine Partner-ID ein.")
             return
+
+        common.remember_partner(self.config, partner_id, partner_pw)
+        self.entry_partner_id["values"] = [p["id"] for p in self.config.get("recent_partners", [])]
 
         relay_url = self.config.get("relay_server", "ws://localhost:8765")
         viewer = RemoteDesktopViewer(self.root, relay_url, partner_id, partner_pw)
@@ -217,6 +234,8 @@ class RustDeskLightApp:
         self.root.destroy()
 
 if __name__ == "__main__":
+    common.enable_dpi_awareness()
     root = tk.Tk()
+    common.apply_tk_scaling(root)
     app = RustDeskLightApp(root)
     root.mainloop()

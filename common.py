@@ -18,6 +18,34 @@ try:
 except ImportError:
     DEFAULT_RELAY = "ws://localhost:8765"
 
+def enable_dpi_awareness():
+    """Makes the process DPI-aware so fonts/screens are correctly sized on HiDPI displays."""
+    if sys.platform != "win32":
+        return
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-monitor DPI aware
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+def apply_tk_scaling(root):
+    """Scales Tk fonts/widgets to the real monitor DPI. Returns scale factor (1.0 = 96 DPI)."""
+    try:
+        dpi = root.winfo_fpixels("1i")
+        root.tk.call("tk", "scaling", dpi / 72.0)
+        return max(1.0, dpi / 96.0)
+    except Exception:
+        return 1.0
+
+def remember_partner(cfg, partner_id, password):
+    """Stores partner at top of recent list (max 8)."""
+    recent = [p for p in cfg.get("recent_partners", []) if p.get("id") != partner_id]
+    recent.insert(0, {"id": partner_id, "password": password})
+    cfg["recent_partners"] = recent[:8]
+    save_config(cfg)
+
 def ensure_desktop_access():
     """Ensures thread has access to active Windows desktop station."""
     if sys.platform == "win32":

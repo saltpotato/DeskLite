@@ -64,11 +64,23 @@ class RemoteDesktopViewer(tk.Toplevel):
         
         self.btn_fullscreen = tk.Button(self.toolbar, text="⛶ Vollbild", bg="#34495e", fg="white",
                                         relief=tk.FLAT, font=("Segoe UI", 8), command=self.toggle_fullscreen)
-        self.btn_fullscreen.pack(side=tk.RIGHT, padx=6, pady=4)
+        self.btn_fullscreen.pack(side=tk.RIGHT, padx=4, pady=4)
+
+        self.btn_task_mgr = tk.Button(self.toolbar, text="⚙️ Taskmgr", bg="#34495e", fg="white",
+                                      relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.send_shortcut("task_manager"))
+        self.btn_task_mgr.pack(side=tk.RIGHT, padx=3, pady=4)
+
+        self.btn_explorer = tk.Button(self.toolbar, text="📁 Explorer", bg="#34495e", fg="white",
+                                      relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.send_shortcut("explorer"))
+        self.btn_explorer.pack(side=tk.RIGHT, padx=3, pady=4)
+
+        self.btn_win = tk.Button(self.toolbar, text="🪟 Start", bg="#34495e", fg="white",
+                                 relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.send_shortcut("win_key"))
+        self.btn_win.pack(side=tk.RIGHT, padx=3, pady=4)
 
         self.btn_ctrl_alt_del = tk.Button(self.toolbar, text="Ctrl+Alt+Entf", bg="#34495e", fg="white",
                                           relief=tk.FLAT, font=("Segoe UI", 8), command=self.send_ctrl_alt_del)
-        self.btn_ctrl_alt_del.pack(side=tk.RIGHT, padx=4, pady=4)
+        self.btn_ctrl_alt_del.pack(side=tk.RIGHT, padx=3, pady=4)
 
         self.btn_hq = tk.Button(self.toolbar, text="💎 HQ", bg="#8e44ad", fg="white",
                                 relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.set_quality(75, 1.0))
@@ -114,6 +126,9 @@ class RemoteDesktopViewer(tk.Toplevel):
     def toggle_fullscreen(self):
         is_fs = self.attributes("-fullscreen")
         self.attributes("-fullscreen", not is_fs)
+
+    def send_shortcut(self, name):
+        self.send_input({"event": "shortcut", "name": name})
 
     def send_ctrl_alt_del(self):
         self.send_input({"event": "key_down", "key": "ctrl"})

@@ -102,6 +102,10 @@
         <button type="button" onclick="setQuality(45, 0.60)" style="background:#059669; padding:4px 8px; font-size:11px;" title="Sehr schnell, minimales Datenvolumen">🚀 Turbo</button>
         <button type="button" onclick="setQuality(60, 0.75)" style="background:#2563eb; padding:4px 8px; font-size:11px;" title="Gutes Gleichgewicht">⚖️ Normal</button>
         <button type="button" onclick="setQuality(75, 1.0)" style="background:#7c3aed; padding:4px 8px; font-size:11px;" title="Volle 1:1 Auflösung">💎 HQ</button>
+        <div style="height: 20px; width: 1px; background: #444; margin: 0 4px;"></div>
+        <button type="button" onclick="sendShortcut('win_key')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Startmenü öffnen">🪟 Start</button>
+        <button type="button" onclick="sendShortcut('explorer')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Windows Explorer öffnen">📁 Explorer</button>
+        <button type="button" onclick="sendShortcut('task_manager')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Task-Manager öffnen">⚙️ Taskmgr</button>
       </div>
       <div style="height: 20px; width: 1px; background: #444; margin: 0 4px;"></div>
       <a href="/download/RustDeskLight.exe" download style="text-decoration:none;">
@@ -190,6 +194,12 @@
       if (ws && isConnected) {
         ws.send(JSON.stringify({ type: "set_quality", quality: quality, scale: scale }));
         setStatus(`Profil: ${quality}%, ${Math.round(scale*100)}% Skalierung`, "green");
+      }
+    }
+
+    function sendShortcut(name) {
+      if (ws && isConnected) {
+        ws.send(JSON.stringify({ type: "input", data: { event: "shortcut", name: name } }));
       }
     }
 

@@ -29,6 +29,10 @@ SPECIAL_KEYS = {
     "up": Key.up,
     "down": Key.down,
     "caps_lock": Key.caps_lock,
+    "cmd": Key.cmd,
+    "win": Key.cmd,
+    "super": Key.cmd,
+    "meta": Key.cmd,
     "f1": Key.f1, "f2": Key.f2, "f3": Key.f3, "f4": Key.f4,
     "f5": Key.f5, "f6": Key.f6, "f7": Key.f7, "f8": Key.f8,
     "f9": Key.f9, "f10": Key.f10, "f11": Key.f11, "f12": Key.f12
@@ -91,3 +95,21 @@ class InputController:
                 self.keyboard.release(SPECIAL_KEYS[key_name])
             elif len(event.get("char", "")) > 0:
                 self.keyboard.release(event["char"])
+
+        elif evt_type == "shortcut":
+            name = event.get("name")
+            if name == "win_key":
+                self.keyboard.press(Key.cmd)
+                self.keyboard.release(Key.cmd)
+            elif name == "explorer":
+                self.keyboard.press(Key.cmd)
+                self.keyboard.press('e')
+                self.keyboard.release('e')
+                self.keyboard.release(Key.cmd)
+            elif name == "task_manager":
+                self.keyboard.press(Key.ctrl)
+                self.keyboard.press(Key.shift)
+                self.keyboard.press(Key.esc)
+                self.keyboard.release(Key.esc)
+                self.keyboard.release(Key.shift)
+                self.keyboard.release(Key.ctrl)
