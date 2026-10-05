@@ -10,7 +10,7 @@ from input_controller import InputController
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [HOST] %(message)s")
 
 class HostService:
-    def __init__(self, relay_url, my_id, my_password, quality=60, max_fps=30, scale=0.85, status_callback=None):
+    def __init__(self, relay_url, my_id, my_password, quality=55, max_fps=30, scale=0.75, status_callback=None):
         self.relay_url = relay_url
         self.my_id = my_id
         self.my_password = my_password
@@ -21,6 +21,7 @@ class HostService:
         
         self.running = False
         self.active_viewers = 0
+        self.force_frame = False
         self.thread = None
         self.loop = None
         
@@ -59,9 +60,11 @@ class HostService:
         while self.running and self.active_viewers > 0:
             start_t = time.time()
             try:
-                # draw_cursor=False: allows 0ms local hardware cursor on viewer!
-                frame_bytes = self.capturer.capture_frame(draw_cursor=False)
-                await ws.send(frame_bytes)
+                force = self.force_frame
+                self.force_frame = False
+                frame_bytes = self.capturer.capture_frame(draw_cursor=False, force=force)
+                if frame_bytes is not None:
+                    await ws.send(frame_bytes)
             except Exception as e:
                 logging.debug(f"Stream-Fehler: {e}")
                 break
@@ -132,8 +135,19 @@ class HostService:
                                     stream_task.cancel()
 
                         elif msg_type == "input":
-                            # Process mouse / keyboard event
-                            self.input_controller.handle_event(data.get("data", {}))
+                            evt_data = data.get("data", {})
+                            self.input_controller.handle_event(evt_data)
+                            # Event-driven streaming: immediate frame on click or keypress
+                            if evt_data.get("event") in ("mouse_down", "mouse_up", "mouse_click", "key_down", "mouse_wheel"):
+                                self.force_frame = True
+
+                        elif msg_type == "set_quality":
+                            self.capturer.update_settings(
+                                quality=data.get("quality"),
+                                scale=data.get("scale")
+                            )
+                            self.force_frame = True
+                            logging.info(f"Qualitätsprofil geändert: scale={self.capturer.scale}, q={self.capturer.quality}")
 
                     except Exception as e:
                         logging.warning(f"Fehler beim Verarbeiten von Steuerungsdaten: {e}")

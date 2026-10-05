@@ -15,11 +15,14 @@ except ImportError:
 from PIL import Image, ImageDraw
 
 class ScreenCapturer:
-    def __init__(self, monitor_index=1, quality=60, scale=0.85):
+    def __init__(self, monitor_index=1, quality=55, scale=0.75):
         ensure_desktop_access()
         self.quality = quality
         self.scale = scale
         self.sct = mss.MSS()
+        
+        self.last_thumb = None
+        self.last_send_time = 0
         
         # Primary or selected monitor
         if monitor_index < len(self.sct.monitors):
@@ -31,6 +34,13 @@ class ScreenCapturer:
         self.height = self.monitor["height"]
         self.left = self.monitor["left"]
         self.top = self.monitor["top"]
+
+    def update_settings(self, quality=None, scale=None):
+        if quality is not None:
+            self.quality = max(20, min(95, int(quality)))
+        if scale is not None:
+            self.scale = max(0.2, min(1.0, float(scale)))
+        self.last_thumb = None  # Force next frame to be sent
 
     def get_cursor_pos(self):
         """Returns cursor coordinates relative to monitor."""
@@ -45,15 +55,27 @@ class ScreenCapturer:
                 return None
         return None
 
-    def capture_frame(self, draw_cursor=False):
-        """Captures a frame and returns JPEG bytes. By default draw_cursor is False for local cursor rendering."""
+    def capture_frame(self, draw_cursor=False, force=False):
+        """Captures a frame and returns JPEG bytes. Returns None if screen didn't change (smart skip)."""
         ensure_desktop_access()
         raw = self.sct.grab(self.monitor)
+        now = time.time()
 
         if HAS_CV2 and not draw_cursor:
-            # Ultra-fast zero-copy pathway using OpenCV libjpeg-turbo
             img_np = np.frombuffer(raw.raw, dtype=np.uint8).reshape((raw.height, raw.width, 4))
             
+            # Smart Diff Check: avoid wasteful CPU/bandwidth when screen is idle
+            if not force:
+                thumb = cv2.resize(img_np, (48, 27), interpolation=cv2.INTER_NEAREST)
+                if self.last_thumb is not None:
+                    diff = np.mean(np.abs(thumb.astype(np.int16) - self.last_thumb.astype(np.int16)))
+                    # If unchanged and sent recently (< 1.5s), skip frame!
+                    if diff < 0.2 and (now - self.last_send_time < 1.5):
+                        return None
+                self.last_thumb = thumb
+
+            self.last_send_time = now
+
             if self.scale != 1.0 and 0.1 <= self.scale < 1.0:
                 new_w = max(100, int(self.width * self.scale))
                 new_h = max(100, int(self.height * self.scale))
@@ -66,6 +88,7 @@ class ScreenCapturer:
             return enc.tobytes()
 
         # Fallback to PIL
+        self.last_send_time = now
         img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
 
         if draw_cursor:

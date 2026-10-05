@@ -97,6 +97,12 @@
       <input type="password" id="targetPwd" placeholder="Passwort" size="10">
       <button id="btnConnect" onclick="toggleConnect()">Verbinden</button>
       <button onclick="document.body.requestFullscreen()">⛶ Vollbild</button>
+      <div id="qualityControls" style="display:none; align-items:center; gap:4px;">
+        <div style="height: 20px; width: 1px; background: #444; margin: 0 2px;"></div>
+        <button type="button" onclick="setQuality(45, 0.60)" style="background:#059669; padding:4px 8px; font-size:11px;" title="Sehr schnell, minimales Datenvolumen">🚀 Turbo</button>
+        <button type="button" onclick="setQuality(60, 0.75)" style="background:#2563eb; padding:4px 8px; font-size:11px;" title="Gutes Gleichgewicht">⚖️ Normal</button>
+        <button type="button" onclick="setQuality(75, 1.0)" style="background:#7c3aed; padding:4px 8px; font-size:11px;" title="Volle 1:1 Auflösung">💎 HQ</button>
+      </div>
       <div style="height: 20px; width: 1px; background: #444; margin: 0 4px;"></div>
       <a href="/download/RustDeskLight.exe" download style="text-decoration:none;">
         <button type="button" style="background:#10b981;" title="Eigenständige EXE - kein Python nötig">📥 App (.exe)</button>
@@ -176,7 +182,15 @@
       btnConnect.style.background = "#2563eb";
       setStatus("Getrennt", "");
       document.getElementById("welcomeOverlay").style.display = "block";
+      document.getElementById("qualityControls").style.display = "none";
       canvas.style.display = "none";
+    }
+
+    function setQuality(quality, scale) {
+      if (ws && isConnected) {
+        ws.send(JSON.stringify({ type: "set_quality", quality: quality, scale: scale }));
+        setStatus(`Profil: ${quality}%, ${Math.round(scale*100)}% Skalierung`, "green");
+      }
     }
 
     function connect() {
@@ -214,6 +228,7 @@
               btnConnect.style.background = "#dc2626";
               setStatus(`Verbunden mit ${targetId}`, "green");
               document.getElementById("welcomeOverlay").style.display = "none";
+              document.getElementById("qualityControls").style.display = "flex";
               canvas.style.display = "block";
             } else if (msg.status === "error") {
               alert(msg.message);

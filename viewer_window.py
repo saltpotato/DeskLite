@@ -68,7 +68,19 @@ class RemoteDesktopViewer(tk.Toplevel):
 
         self.btn_ctrl_alt_del = tk.Button(self.toolbar, text="Ctrl+Alt+Entf", bg="#34495e", fg="white",
                                           relief=tk.FLAT, font=("Segoe UI", 8), command=self.send_ctrl_alt_del)
-        self.btn_ctrl_alt_del.pack(side=tk.RIGHT, padx=6, pady=4)
+        self.btn_ctrl_alt_del.pack(side=tk.RIGHT, padx=4, pady=4)
+
+        self.btn_hq = tk.Button(self.toolbar, text="💎 HQ", bg="#8e44ad", fg="white",
+                                relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.set_quality(75, 1.0))
+        self.btn_hq.pack(side=tk.RIGHT, padx=3, pady=4)
+
+        self.btn_balanced = tk.Button(self.toolbar, text="⚖️ Normal", bg="#2980b9", fg="white",
+                                      relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.set_quality(60, 0.75))
+        self.btn_balanced.pack(side=tk.RIGHT, padx=3, pady=4)
+
+        self.btn_turbo = tk.Button(self.toolbar, text="🚀 Turbo", bg="#27ae60", fg="white",
+                                   relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.set_quality(45, 0.60))
+        self.btn_turbo.pack(side=tk.RIGHT, padx=3, pady=4)
 
         # Canvas with hardware cursor enabled (0ms lag!)
         self.canvas = tk.Canvas(self, bg="black", highlightthickness=0, cursor="arrow")
@@ -110,6 +122,12 @@ class RemoteDesktopViewer(tk.Toplevel):
         self.send_input({"event": "key_up", "key": "delete"})
         self.send_input({"event": "key_up", "key": "alt"})
         self.send_input({"event": "key_up", "key": "ctrl"})
+
+    def set_quality(self, quality, scale):
+        if self.ws and self.loop and self.loop.is_running():
+            msg = json.dumps({"type": "set_quality", "quality": quality, "scale": scale})
+            asyncio.run_coroutine_threadsafe(self._ws_send(msg), self.loop)
+            self.status_label.config(text=f"Modus aktiv: Qualität {quality}%, Skalierung {int(scale*100)}%")
 
     def on_canvas_resize(self, event):
         self.canvas_w = event.width

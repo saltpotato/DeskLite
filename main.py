@@ -106,12 +106,24 @@ class RustDeskLightApp:
         server_row.pack(fill=tk.X, pady=(0, 6))
 
         ttk.Label(server_row, text="Relay-Server:").pack(side=tk.LEFT)
-        self.entry_server = ttk.Entry(server_row, width=32)
+        self.entry_server = ttk.Entry(server_row, width=26)
         self.entry_server.insert(0, self.config.get("relay_server", "ws://localhost:8765"))
-        self.entry_server.pack(side=tk.LEFT, padx=8)
+        self.entry_server.pack(side=tk.LEFT, padx=6)
 
-        btn_save_server = ttk.Button(server_row, text="Server ändern", command=self.save_server)
-        btn_save_server.pack(side=tk.LEFT)
+        btn_save_server = ttk.Button(server_row, text="Speichern", command=self.save_server)
+        btn_save_server.pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Label(server_row, text="Profil:").pack(side=tk.LEFT)
+        self.combo_mode = ttk.Combobox(server_row, values=["🚀 Turbo", "⚖️ Normal", "💎 HQ"], state="readonly", width=10)
+        curr_scale = self.config.get("scale", 0.75)
+        if curr_scale <= 0.65:
+            self.combo_mode.current(0)
+        elif curr_scale >= 0.95:
+            self.combo_mode.current(2)
+        else:
+            self.combo_mode.current(1)
+        self.combo_mode.pack(side=tk.LEFT, padx=6)
+        self.combo_mode.bind("<<ComboboxSelected>>", self.on_mode_change)
 
         # Status text
         self.lbl_status = ttk.Label(bottom_frame, text="🟡 Initialisiere...", style="Status.TLabel")
@@ -172,6 +184,21 @@ class RustDeskLightApp:
         common.save_config(self.config)
         self.start_host_service()
         messagebox.showinfo("Gespeichert", f"Relay-Server aktualisiert: {new_server}")
+
+    def on_mode_change(self, event=None):
+        val = self.combo_mode.get()
+        if "Turbo" in val:
+            self.config["quality"] = 45
+            self.config["scale"] = 0.60
+        elif "HQ" in val:
+            self.config["quality"] = 75
+            self.config["scale"] = 1.0
+        else:
+            self.config["quality"] = 60
+            self.config["scale"] = 0.75
+        common.save_config(self.config)
+        if self.host_service:
+            self.host_service.capturer.update_settings(quality=self.config["quality"], scale=self.config["scale"])
 
     def connect_partner(self):
         partner_id = self.entry_partner_id.get().strip()
