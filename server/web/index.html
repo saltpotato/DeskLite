@@ -149,6 +149,7 @@
   <script>
     let ws = null;
     let isConnected = false;
+    let shouldReconnect = false;
     let canvas = document.getElementById("screenCanvas");
     let ctx = canvas.getContext("2d");
     let statusText = document.getElementById("statusText");
@@ -170,14 +171,17 @@
     }
 
     function toggleConnect() {
-      if (isConnected) {
+      if (isConnected || shouldReconnect) {
+        shouldReconnect = false;
         disconnect();
       } else {
+        shouldReconnect = true;
         connect();
       }
     }
 
     function disconnect() {
+      shouldReconnect = false;
       if (ws) {
         ws.close();
       }
@@ -208,6 +212,7 @@
       const pwd = document.getElementById("targetPwd").value.trim();
       if (!targetId) {
         alert("Bitte eine Host-ID eingeben!");
+        shouldReconnect = false;
         return;
       }
 
@@ -216,6 +221,9 @@
       const wsUrl = `${protocol}//${host}`;
 
       setStatus("Verbinde mit Server...", "yellow");
+      btnConnect.innerText = "Trennen";
+      btnConnect.style.background = "#dc2626";
+
       ws = new WebSocket(wsUrl);
       ws.binaryType = "blob";
 
@@ -234,23 +242,26 @@
             const msg = JSON.parse(evt.data);
             if (msg.status === "connected") {
               isConnected = true;
-              btnConnect.innerText = "Trennen";
-              btnConnect.style.background = "#dc2626";
               setStatus(`Verbunden mit ${targetId}`, "green");
               document.getElementById("welcomeOverlay").style.display = "none";
               document.getElementById("qualityControls").style.display = "flex";
               canvas.style.display = "block";
             } else if (msg.status === "error") {
-              alert(msg.message);
-              disconnect();
+              if (msg.message && msg.message.toLowerCase().includes("passwort")) {
+                shouldReconnect = false;
+                alert(msg.message);
+                disconnect();
+              } else {
+                // Host temporarily unavailable or busy
+                setStatus(msg.message + " – versuche erneut in 2s...", "yellow");
+              }
             } else if (msg.type === "screen_info") {
               remoteWidth = msg.width;
               remoteHeight = msg.height;
               canvas.width = remoteWidth;
               canvas.height = remoteHeight;
             } else if (msg.type === "host_disconnected") {
-              alert("Host hat die Verbindung beendet.");
-              disconnect();
+              setStatus("Host getrennt – warte auf Wiederverbindung...", "yellow");
             }
           } catch(e) {}
         } else if (evt.data instanceof Blob) {
@@ -281,11 +292,18 @@
       }
 
       ws.onclose = () => {
-        if (isConnected) {
-          setStatus("Verbindung verloren", "");
+        if (shouldReconnect) {
+          setStatus("Verbindung unterbrochen – verbinde automatisch in 2s neu...", "yellow");
+          setTimeout(() => {
+            if (shouldReconnect) {
+              connect();
+            }
+          }, 2000);
+        } else {
+          isConnected = false;
           btnConnect.innerText = "Verbinden";
           btnConnect.style.background = "#2563eb";
-          isConnected = false;
+          setStatus("Getrennt", "");
         }
       };
 

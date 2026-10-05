@@ -206,15 +206,22 @@ class RemoteDesktopViewer(tk.Toplevel):
     def _run_async_worker(self):
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
-        self.loop.run_until_complete(self._connect_and_view())
+        while self.running:
+            try:
+                self.loop.run_until_complete(self._connect_and_view())
+            except Exception as e:
+                logging.debug(f"Verbindungsfehler: {e}")
+            if self.running:
+                self.after(0, lambda: self.status_label.config(text="🟡 Verbindung unterbrochen – verbinde automatisch in 2s neu..."))
+                time.sleep(2)
 
     async def _connect_and_view(self):
         try:
             async with websockets.connect(
                 self.relay_url,
                 max_size=20 * 1024 * 1024,
-                ping_interval=15,
-                ping_timeout=15
+                ping_interval=20,
+                ping_timeout=40
             ) as ws:
                 self.ws = ws
                 req = {
@@ -228,7 +235,11 @@ class RemoteDesktopViewer(tk.Toplevel):
                 resp = json.loads(resp_str)
                 if resp.get("status") != "connected":
                     err_msg = resp.get("message", "Verbindung abgelehnt")
-                    self.after(0, lambda: self._show_error(err_msg))
+                    if "passwort" in err_msg.lower():
+                        self.running = False
+                        self.after(0, lambda: self._show_error(err_msg))
+                        return
+                    # Host momentarily offline, will retry
                     return
 
                 self.after(0, lambda: self.status_label.config(text=f"Verbunden mit {self.target_id}"))
@@ -251,13 +262,12 @@ class RemoteDesktopViewer(tk.Toplevel):
                                 self.remote_width = meta.get("width", 1920)
                                 self.remote_height = meta.get("height", 1080)
                             elif meta.get("type") == "host_disconnected":
-                                self.after(0, lambda: self._show_error("Host hat die Verbindung beendet."))
+                                self.after(0, lambda: self.status_label.config(text="🟡 Host kurz getrennt – warte auf Wiederverbindung..."))
                                 break
                         except Exception:
                             pass
-        except Exception as e:
-            if self.running:
-                self.after(0, lambda: self._show_error(f"Verbindungsfehler: {e}"))
+        except Exception:
+            pass
 
     def _process_latest_frame(self):
         self.render_pending = False

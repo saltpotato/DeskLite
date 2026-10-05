@@ -53,21 +53,33 @@ class HostService:
             except Exception as e:
                 logging.warning(f"Verbindungsunterbrechung zum Relay: {e}")
                 self.set_status("disconnected", str(e))
-                time.sleep(3) # Wait before retry
+                time.sleep(2) # Auto-reconnect after 2 seconds
 
     async def _stream_frames(self, ws):
         interval = 1.0 / max(1, self.max_fps)
+        consecutive_errors = 0
         while self.running and self.active_viewers > 0:
             start_t = time.time()
             try:
                 force = self.force_frame
                 self.force_frame = False
                 frame_bytes = self.capturer.capture_frame(draw_cursor=False, force=force)
-                if frame_bytes is not None:
-                    await ws.send(frame_bytes)
+                consecutive_errors = 0
             except Exception as e:
-                logging.debug(f"Stream-Fehler: {e}")
-                break
+                consecutive_errors += 1
+                logging.debug(f"Capture-Fehler (vorübergehend): {e}")
+                frame_bytes = None
+                if consecutive_errors > 30:
+                    break
+                await asyncio.sleep(0.1)
+                continue
+
+            if frame_bytes is not None:
+                try:
+                    await ws.send(frame_bytes)
+                except Exception as e:
+                    logging.debug(f"Stream-Netzwerkfehler: {e}")
+                    break
             
             elapsed = time.time() - start_t
             sleep_t = interval - elapsed
@@ -81,8 +93,8 @@ class HostService:
         async with websockets.connect(
             self.relay_url,
             max_size=20 * 1024 * 1024,
-            ping_interval=15,
-            ping_timeout=15
+            ping_interval=20,
+            ping_timeout=40
         ) as ws:
             # Register Host
             reg_payload = {
@@ -122,7 +134,7 @@ class HostService:
                             }
                             await ws.send(json.dumps(info))
 
-                            # Start streaming frames if not already streaming
+                            # Start streaming frames
                             if stream_task is None or stream_task.done():
                                 stream_task = asyncio.create_task(self._stream_frames(ws))
 
@@ -137,9 +149,12 @@ class HostService:
                         elif msg_type == "input":
                             evt_data = data.get("data", {})
                             self.input_controller.handle_event(evt_data)
-                            # Event-driven streaming: immediate frame on click or keypress
-                            if evt_data.get("event") in ("mouse_down", "mouse_up", "mouse_click", "key_down", "mouse_wheel"):
-                                self.force_frame = True
+                            self.force_frame = True
+                            
+                            # Auto-revive stream_task if it died unexpectedly during idle
+                            if self.active_viewers > 0 and (stream_task is None or stream_task.done()):
+                                logging.info("Reaktiviere Desktop-Stream nach Inaktivität...")
+                                stream_task = asyncio.create_task(self._stream_frames(ws))
 
                         elif msg_type == "set_quality":
                             self.capturer.update_settings(

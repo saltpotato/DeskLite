@@ -187,7 +187,7 @@ async def main():
         process_request=process_http_request,
         max_size=25 * 1024 * 1024, # 25MB max frame size
         ping_interval=20,
-        ping_timeout=20
+        ping_timeout=40
     ):
         await asyncio.Future()
 
