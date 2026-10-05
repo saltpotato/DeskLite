@@ -2,7 +2,7 @@ import sys
 import pynput
 from pynput.mouse import Button, Controller as MouseController
 from pynput.keyboard import Key, Controller as KeyboardController
-from common import ensure_desktop_access
+from common import ensure_desktop_access, is_admin
 
 SPECIAL_KEYS = {
     "enter": Key.enter,
@@ -113,9 +113,10 @@ class InputController:
                 self.keyboard.release('e')
                 self.keyboard.release(Key.cmd)
             elif name == "task_manager":
-                self.keyboard.press(Key.ctrl)
-                self.keyboard.press(Key.shift)
-                self.keyboard.press(Key.esc)
-                self.keyboard.release(Key.esc)
-                self.keyboard.release(Key.shift)
-                self.keyboard.release(Key.ctrl)
+                if is_admin():
+                    self.keyboard.press(Key.ctrl)
+                    self.keyboard.press(Key.shift)
+                    self.keyboard.press(Key.esc)
+                    self.keyboard.release(Key.esc)
+                    self.keyboard.release(Key.shift)
+                    self.keyboard.release(Key.ctrl)

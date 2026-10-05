@@ -70,9 +70,6 @@ class RemoteDesktopViewer(tk.Toplevel):
                                      relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.send_shortcut("desktop"))
         self.btn_desktop.pack(side=tk.RIGHT, padx=3, pady=4)
 
-        self.btn_task_mgr = tk.Button(self.toolbar, text="⚙️ Taskmgr", bg="#34495e", fg="white",
-                                      relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.send_shortcut("task_manager"))
-        self.btn_task_mgr.pack(side=tk.RIGHT, padx=3, pady=4)
 
         self.btn_explorer = tk.Button(self.toolbar, text="📁 Explorer", bg="#34495e", fg="white",
                                       relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.send_shortcut("explorer"))
