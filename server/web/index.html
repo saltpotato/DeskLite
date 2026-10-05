@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>RustDesk Light - Web Viewer</title>
+  <title>DeskLite - Web Viewer</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -91,7 +91,7 @@
 </head>
 <body>
   <header>
-    <h1>⚡ RustDesk Light</h1>
+    <h1>⚡ DeskLite</h1>
     <div class="controls">
       <input type="text" id="targetId" list="recentPartnersList" placeholder="Host-ID (z. B. 123 456)" size="14" oninput="onTargetIdInput()">
       <datalist id="recentPartnersList"></datalist>
@@ -110,7 +110,7 @@
         <button type="button" onclick="sendShortcut('explorer')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Windows Explorer öffnen">📁 Explorer</button>
       </div>
       <div style="height: 20px; width: 1px; background: #444; margin: 0 4px;"></div>
-      <a href="/download/RustDeskLight.exe" download style="text-decoration:none;">
+      <a href="/download/DeskLite.exe" download style="text-decoration:none;">
         <button type="button" style="background:#10b981;" title="Eigenständige Windows App (.exe) - kein Python nötig">📥 App (.exe)</button>
       </a>
     </div>
@@ -122,14 +122,14 @@
 
   <div id="viewport">
     <div id="welcomeOverlay" style="text-align:center; padding: 30px; max-width: 600px; background: #262630; border-radius: 12px; border: 1px solid #3d3d4e; box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
-      <h2 style="margin-bottom: 12px; color: #60a5fa; font-size: 24px;">⚡ RustDesk Light</h2>
+      <h2 style="margin-bottom: 12px; color: #60a5fa; font-size: 24px;">⚡ DeskLite</h2>
       <p style="color: #cbd5e1; font-size: 14px; margin-bottom: 24px; line-height: 1.6;">
         Steuere entfernte PCs direkt in diesem Browserfenster oder lade den Client für deinen PC herunter:
       </p>
       <div style="display:flex; justify-content:center; gap: 14px; margin-bottom: 20px; flex-wrap: wrap;">
-        <a href="/download/RustDeskLight.exe" download style="text-decoration:none;">
+        <a href="/download/DeskLite.exe" download style="text-decoration:none;">
           <button type="button" style="background:#10b981; padding: 12px 26px; font-size: 15px; border-radius: 6px;">
-            📥 <strong>RustDeskLight.exe herunterladen</strong><br><small style="opacity:0.85; font-size: 11px;">Eigenständige App für Windows (kein Python nötig)</small>
+            📥 <strong>DeskLite.exe herunterladen</strong><br><small style="opacity:0.85; font-size: 11px;">Eigenständige App für Windows (kein Python nötig)</small>
           </button>
         </a>
       </div>
@@ -157,12 +157,17 @@
     let remoteHeight = 1080;
     let lastMouseSend = 0;
 
-    // Partner history management (like RustDesk)
-    const STORAGE_KEY = "rustdesk_light_partners";
+    // Partner history management
+    const STORAGE_KEY = "desklite_partners";
 
     function getSavedPartners() {
       try {
-        return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+        let partners = JSON.parse(localStorage.getItem(STORAGE_KEY));
+        if (!partners || !partners.length) {
+          // Backward compatibility fallback
+          partners = JSON.parse(localStorage.getItem("rustdesk_light_partners")) || [];
+        }
+        return partners;
       } catch (e) {
         return [];
       }

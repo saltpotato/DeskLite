@@ -1,19 +1,19 @@
 @echo off
-title RustDesk Light
+title DeskLite
 cd /d "%~dp0"
 
-if exist "RustDeskLight.exe" (
+if exist "%~dp0DeskLite.exe" (
+    start "" "%~dp0DeskLite.exe"
+    exit /b
+)
+
+if exist "%~dp0dist_build\DeskLite.exe" (
+    start "" "%~dp0dist_build\DeskLite.exe"
+    exit /b
+)
+
+if exist "%~dp0RustDeskLight.exe" (
     start "" "%~dp0RustDeskLight.exe"
-    exit /b
-)
-
-if exist "%~dp0dist_build\RustDeskLight.exe" (
-    start "" "%~dp0dist_build\RustDeskLight.exe"
-    exit /b
-)
-
-if exist "%~dp0dist\RustDeskLight.exe" (
-    start "" "%~dp0dist\RustDeskLight.exe"
     exit /b
 )
 

@@ -1,6 +1,6 @@
-# ⚡ RustDesk Light - Remote Desktop
+# ⚡ DeskLite - Remote Desktop
 
-Ein leichtgewichtiges, schlankes Remote-Desktop-System (wie RustDesk Light), das Firewalls und Router-NATs ohne Portfreigaben auf den Zielrechnern umgeht.
+Ein leichtgewichtiges, schlankes Remote-Desktop-System (DeskLite), das Firewalls und Router-NATs ohne Portfreigaben auf den Zielrechnern umgeht.
 
 ---
 

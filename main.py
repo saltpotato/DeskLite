@@ -4,11 +4,11 @@ import common
 from host_service import HostService
 from viewer_window import RemoteDesktopViewer
 
-class RustDeskLightApp:
+class DeskLiteApp:
     def __init__(self, root):
         self.root = root
         is_adm = common.is_admin()
-        self.root.title(f"RustDesk Light {'[Administrator]' if is_adm else ''} - Remote Desktop")
+        self.root.title(f"DeskLite {'[Administrator]' if is_adm else ''} - Remote Desktop")
         self.root.resizable(False, False)
         
         self.config = common.load_config()
@@ -48,7 +48,7 @@ class RustDeskLightApp:
 
     def _build_ui(self):
         # Header banner
-        header_text = "⚡ RustDesk Light"
+        header_text = "⚡ DeskLite"
         if common.is_admin():
             header_text += " [Administrator]"
         header = ttk.Label(self.root, text=header_text, style="Header.TLabel")
@@ -257,5 +257,5 @@ if __name__ == "__main__":
     common.enable_dpi_awareness()
     root = tk.Tk()
     common.apply_tk_scaling(root)
-    app = RustDeskLightApp(root)
+    app = DeskLiteApp(root)
     root.mainloop()

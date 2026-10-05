@@ -41,7 +41,7 @@ def process_http_request(connection, request):
                 body=body
             )
         else:
-            body = b"<h1>RustDesk Light Relay Server is Running</h1>"
+            body = b"<h1>DeskLite Relay Server is Running</h1>"
             return Response(
                 status_code=200,
                 reason_phrase="OK",
