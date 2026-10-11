@@ -62,44 +62,44 @@ class DeskLiteApp:
         columns = ttk.Frame(self.root)
         columns.pack(fill=tk.BOTH, expand=True, padx=20)
         
-        # LEFT CARD: Dieser PC (Host)
+        # LEFT CARD: This PC (Host)
         left_card = ttk.Frame(columns, style="Card.TFrame", padding=16)
         left_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
         
-        ttk.Label(left_card, text="Dieser PC (Freigabe)", style="Title.TLabel").pack(anchor=tk.W, pady=(0, 12))
+        ttk.Label(left_card, text="This PC (Share)", style="Title.TLabel").pack(anchor=tk.W, pady=(0, 12))
         
-        ttk.Label(left_card, text="Deine ID:", style="CardLabel.TLabel").pack(anchor=tk.W)
+        ttk.Label(left_card, text="Your ID:", style="CardLabel.TLabel").pack(anchor=tk.W)
         self.lbl_id = ttk.Label(left_card, text=self.config.get("my_id", "--- ---"), style="ID.TLabel")
         self.lbl_id.pack(anchor=tk.W, pady=(2, 8))
         
         id_btn_frame = ttk.Frame(left_card, style="Card.TFrame")
         id_btn_frame.pack(fill=tk.X, pady=(0, 12))
-        btn_copy_id = ttk.Button(id_btn_frame, text="📋 ID kopieren", command=self.copy_id)
+        btn_copy_id = ttk.Button(id_btn_frame, text="📋 Copy ID", command=self.copy_id)
         btn_copy_id.pack(side=tk.LEFT)
-        btn_new_id = ttk.Button(id_btn_frame, text="🔄 Neu", command=self.new_id)
+        btn_new_id = ttk.Button(id_btn_frame, text="🔄 New", command=self.new_id)
         btn_new_id.pack(side=tk.LEFT, padx=6)
 
-        ttk.Label(left_card, text="Einmalkennwort:", style="CardLabel.TLabel").pack(anchor=tk.W)
+        ttk.Label(left_card, text="One-Time Password:", style="CardLabel.TLabel").pack(anchor=tk.W)
         self.lbl_pw = ttk.Label(left_card, text=self.config.get("my_password", "------"), style="PW.TLabel")
         self.lbl_pw.pack(anchor=tk.W, pady=(2, 8))
 
-        btn_new_pw = ttk.Button(left_card, text="🔄 Neues Passwort", command=self.new_password)
+        btn_new_pw = ttk.Button(left_card, text="🔄 New Password", command=self.new_password)
         btn_new_pw.pack(anchor=tk.W)
 
-        # RIGHT CARD: Partner steuern (Viewer)
+        # RIGHT CARD: Control Remote PC (Viewer)
         right_card = ttk.Frame(columns, style="Card.TFrame", padding=16)
         right_card.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(10, 0))
         
-        ttk.Label(right_card, text="Partner steuern", style="Title.TLabel").pack(anchor=tk.W, pady=(0, 12))
+        ttk.Label(right_card, text="Control Remote PC", style="Title.TLabel").pack(anchor=tk.W, pady=(0, 12))
         
-        ttk.Label(right_card, text="Partner-ID eingeben:", style="CardLabel.TLabel").pack(anchor=tk.W, pady=(0, 4))
+        ttk.Label(right_card, text="Enter Partner ID:", style="CardLabel.TLabel").pack(anchor=tk.W, pady=(0, 4))
         recent_ids = [p["id"] for p in self.config.get("recent_partners", [])]
         self.entry_partner_id = ttk.Combobox(right_card, font=("Consolas", 14), width=17, values=recent_ids)
         self.entry_partner_id.pack(anchor=tk.W, pady=(0, 12))
         self.entry_partner_id.bind("<Return>", lambda e: self.connect_partner())
         self.entry_partner_id.bind("<<ComboboxSelected>>", self.on_partner_selected)
 
-        ttk.Label(right_card, text="Partner-Passwort (falls gesetzt):", style="CardLabel.TLabel").pack(anchor=tk.W, pady=(0, 4))
+        ttk.Label(right_card, text="Partner Password (if set):", style="CardLabel.TLabel").pack(anchor=tk.W, pady=(0, 4))
         self.entry_partner_pw = ttk.Entry(right_card, font=("Segoe UI", 11), width=18, show="*")
         self.entry_partner_pw.pack(anchor=tk.W, pady=(0, 16))
         self.entry_partner_pw.bind("<Return>", lambda e: self.connect_partner())
@@ -109,10 +109,9 @@ class DeskLiteApp:
             self.entry_partner_id.current(0)
             self.on_partner_selected()
 
-        btn_connect = ttk.Button(right_card, text="🚀 Verbinden", style="Primary.TButton", command=self.connect_partner)
+        btn_connect = ttk.Button(right_card, text="🚀 Connect", style="Primary.TButton", command=self.connect_partner)
         btn_connect.pack(anchor=tk.W, ipady=4, fill=tk.X)
 
-        # BOTTOM: Server & Status
         # BOTTOM: Server, Service & Status
         bottom_frame = ttk.Frame(self.root, padding=(20, 10))
         bottom_frame.pack(fill=tk.X, side=tk.BOTTOM)
@@ -121,16 +120,16 @@ class DeskLiteApp:
         server_row = ttk.Frame(bottom_frame)
         server_row.pack(fill=tk.X, pady=(0, 6))
 
-        ttk.Label(server_row, text="Relay-Server:").pack(side=tk.LEFT)
+        ttk.Label(server_row, text="Relay Server:").pack(side=tk.LEFT)
         self.entry_server = ttk.Entry(server_row, width=24)
         self.entry_server.insert(0, self.config.get("relay_server", "ws://localhost:8765"))
         self.entry_server.pack(side=tk.LEFT, padx=6)
 
-        btn_save_server = ttk.Button(server_row, text="Speichern", command=self.save_server)
+        btn_save_server = ttk.Button(server_row, text="Save", command=self.save_server)
         btn_save_server.pack(side=tk.LEFT, padx=(0, 12))
 
-        ttk.Label(server_row, text="Profil:").pack(side=tk.LEFT)
-        self.combo_mode = ttk.Combobox(server_row, values=["🚀 Schnell", "⚖️ Normal", "💎 HQ"], state="readonly", width=10)
+        ttk.Label(server_row, text="Profile:").pack(side=tk.LEFT)
+        self.combo_mode = ttk.Combobox(server_row, values=["🚀 Fast", "⚖️ Balanced", "💎 HQ"], state="readonly", width=12)
         curr_q = self.config.get("quality", 75)
         if curr_q <= 65:
             self.combo_mode.current(0)
@@ -146,19 +145,19 @@ class DeskLiteApp:
         service_row.pack(fill=tk.X, pady=(4, 6))
 
         if common.is_system():
-            lbl_sys = ttk.Label(service_row, text="🛡️ SYSTEM-Modus aktiv (UAC steuerbar)", foreground="#2e7d32", font=("Segoe UI", 9, "bold"))
+            lbl_sys = ttk.Label(service_row, text="🛡️ SYSTEM Mode Active (UAC controllable)", foreground="#2e7d32", font=("Segoe UI", 9, "bold"))
             lbl_sys.pack(side=tk.LEFT, padx=(0, 8))
         else:
-            self.btn_service = ttk.Button(service_row, text="⚡ Als SYSTEM neu starten (für UAC)", command=self.switch_to_system)
+            self.btn_service = ttk.Button(service_row, text="⚡ Restart as SYSTEM (for UAC)", command=self.switch_to_system)
             self.btn_service.pack(side=tk.LEFT, padx=(0, 8))
 
         sec_desk_on = common.get_uac_secure_desktop()
-        uac_text = "🔓 UAC im Stream sichtbar machen" if sec_desk_on else "↩️ UAC-Abdunkelung (Standard) aktivieren"
+        uac_text = "🔓 Make UAC Visible in Stream" if sec_desk_on else "↩️ Restore UAC Screen Dimming"
         self.btn_uac = ttk.Button(service_row, text=uac_text, command=self.toggle_uac_setting)
         self.btn_uac.pack(side=tk.LEFT)
 
         # Status text
-        self.lbl_status = ttk.Label(bottom_frame, text="🟡 Initialisiere...", style="Status.TLabel")
+        self.lbl_status = ttk.Label(bottom_frame, text="🟡 Initializing...", style="Status.TLabel")
         self.lbl_status.pack(anchor=tk.W, pady=(4, 0))
 
     def start_host_service(self):
@@ -191,7 +190,7 @@ class DeskLiteApp:
     def copy_id(self):
         self.root.clipboard_clear()
         self.root.clipboard_append(self.config.get("my_id", ""))
-        messagebox.showinfo("Kopiert", "Deine ID wurde in die Zwischenablage kopiert!")
+        messagebox.showinfo("Copied", "Your ID has been copied to the clipboard!")
 
     def new_id(self):
         new_val = common.generate_id()
@@ -210,16 +209,16 @@ class DeskLiteApp:
     def save_server(self):
         new_server = self.entry_server.get().strip()
         if not new_server.startswith("ws://") and not new_server.startswith("wss://"):
-            messagebox.showwarning("Ungültige URL", "Die Server-URL muss mit ws:// oder wss:// beginnen.")
+            messagebox.showwarning("Invalid URL", "The server URL must start with ws:// or wss://.")
             return
         self.config["relay_server"] = new_server
         common.save_config(self.config)
         self.start_host_service()
-        messagebox.showinfo("Gespeichert", f"Relay-Server aktualisiert: {new_server}")
+        messagebox.showinfo("Saved", f"Relay server updated: {new_server}")
 
     def on_mode_change(self, event=None):
         val = self.combo_mode.get()
-        if "Schnell" in val or "Turbo" in val:
+        if "Fast" in val or "Schnell" in val or "Turbo" in val:
             self.config["quality"] = 65
             self.config["scale"] = 1.0  # Crisp text, never downscale!
         elif "HQ" in val:
@@ -234,7 +233,7 @@ class DeskLiteApp:
 
     def switch_to_system(self):
         if not common.elevate_to_system():
-            messagebox.showerror("Fehler", "Konnte nicht in den SYSTEM-Modus wechseln (Admin-Rechte erforderlich).")
+            messagebox.showerror("Error", "Could not switch to SYSTEM mode (Administrator privileges required).")
 
     def toggle_uac_setting(self):
         sec_desk_on = common.get_uac_secure_desktop()
@@ -244,25 +243,25 @@ class DeskLiteApp:
                 self.config["uac_secure_desktop"] = False
                 common.save_config(self.config)
                 messagebox.showinfo(
-                    "UAC für Remote optimiert",
-                    "UAC-Abfragen (Ja/Nein) erscheinen weiterhin ganz normal, aber ohne den Bildschirm abzudunkeln.\n\nDadurch kannst du UAC-Fenster im Browser sehen und anklicken."
+                    "UAC Optimized for Remote",
+                    "UAC prompts (Yes/No) will still appear normally, but without dimming the screen.\n\nThis allows you to see and click UAC dialogs in the remote viewer."
                 )
                 if hasattr(self, "btn_uac"):
-                    self.btn_uac.config(text="↩️ UAC-Abdunkelung (Standard) aktivieren")
+                    self.btn_uac.config(text="↩️ Restore UAC Screen Dimming")
             else:
-                messagebox.showerror("Fehler", "Konnte Einstellung nicht ändern (Admin-Rechte erforderlich).")
+                messagebox.showerror("Error", "Could not update UAC setting (Administrator privileges required).")
         else:
             if common.set_uac_secure_desktop(True):
                 self.config["uac_secure_desktop"] = True
                 common.save_config(self.config)
                 messagebox.showinfo(
-                    "UAC auf Windows-Standard",
-                    "Die Windows-Bildschirmabdunkelung (Secure Desktop) bei UAC-Abfragen ist wieder aktiviert."
+                    "UAC Default Restored",
+                    "Windows screen dimming (Secure Desktop) for UAC prompts has been re-enabled."
                 )
                 if hasattr(self, "btn_uac"):
-                    self.btn_uac.config(text="🔓 UAC im Stream sichtbar machen")
+                    self.btn_uac.config(text="🔓 Make UAC Visible in Stream")
             else:
-                messagebox.showerror("Fehler", "Konnte Einstellung nicht ändern (Admin-Rechte erforderlich).")
+                messagebox.showerror("Error", "Could not update UAC setting (Administrator privileges required).")
 
     def on_partner_selected(self, event=None):
         pid = self.entry_partner_id.get().strip()
@@ -277,7 +276,7 @@ class DeskLiteApp:
         partner_pw = self.entry_partner_pw.get().strip()
         
         if not partner_id:
-            messagebox.showwarning("Eingabe fehlt", "Bitte gib eine Partner-ID ein.")
+            messagebox.showwarning("Missing Input", "Please enter a Partner ID.")
             return
 
         common.remember_partner(self.config, partner_id, partner_pw)

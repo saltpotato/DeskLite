@@ -461,7 +461,7 @@ def cleanup_broken_service(service_name="DeskLiteService"):
 def install_service(service_name="DeskLiteService"):
     """Installs DeskLite as a Windows background service under SYSTEM account."""
     if sys.platform != "win32":
-        return False, "Nur unter Windows unterstützt"
+        return False, "Only supported on Windows"
     if getattr(sys, "frozen", False):
         bin_path = f'"{sys.executable}" --service'
     else:
@@ -483,20 +483,20 @@ def install_service(service_name="DeskLiteService"):
         
         # Start service
         subprocess.run(["sc.exe", "start", service_name], capture_output=True, creationflags=0x08000000)
-        return True, "Dienst erfolgreich installiert und gestartet!"
+        return True, "Service installed and started successfully!"
     except Exception as e:
         return False, str(e)
 
 def uninstall_service(service_name="DeskLiteService"):
     """Stops and deletes the DeskLite Windows background service."""
     if sys.platform != "win32":
-        return False, "Nur unter Windows unterstützt"
+        return False, "Only supported on Windows"
     import subprocess
     try:
         subprocess.run(["sc.exe", "stop", service_name], capture_output=True, creationflags=0x08000000)
         res = subprocess.run(["sc.exe", "delete", service_name], capture_output=True, text=True, creationflags=0x08000000)
         if res.returncode == 0:
-            return True, "Dienst erfolgreich deinstalliert!"
+            return True, "Service uninstalled successfully!"
         return False, res.stderr or res.stdout
     except Exception as e:
         return False, str(e)

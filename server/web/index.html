@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -88,7 +88,7 @@
     .badge.green { background: #10b981; }
     .badge.yellow { background: #f59e0b; }
 
-    /* Immersiver Vollbildmodus wie bei RustDesk / AnyDesk */
+    /* Immersive fullscreen mode */
     body.is-fullscreen header {
       position: fixed;
       top: 0;
@@ -117,30 +117,30 @@
   <header id="mainHeader">
     <h1>⚡ DeskLite</h1>
     <div class="controls">
-      <input type="text" id="targetId" list="recentPartnersList" placeholder="Host-ID (z. B. 123 456)" size="14" oninput="onTargetIdInput()">
+      <input type="text" id="targetId" list="recentPartnersList" placeholder="Host ID (e.g. 123 456)" size="14" oninput="onTargetIdInput()">
       <datalist id="recentPartnersList"></datalist>
-      <input type="password" id="targetPwd" placeholder="Passwort" size="10">
-      <button id="btnConnect" onclick="toggleConnect()">Verbinden</button>
-      <button id="btnFullscreen" type="button" onclick="toggleFullscreen()">⛶ Vollbild</button>
+      <input type="password" id="targetPwd" placeholder="Password" size="10">
+      <button id="btnConnect" onclick="toggleConnect()">Connect</button>
+      <button id="btnFullscreen" type="button" onclick="toggleFullscreen()">⛶ Fullscreen</button>
       <div id="qualityControls" style="display:none; align-items:center; gap:4px;">
         <div style="height: 20px; width: 1px; background: #444; margin: 0 2px;"></div>
-        <button type="button" onclick="setQuality(65, 1.0)" style="background:#059669; padding:4px 8px; font-size:11px;" title="Sehr schnell, native 1:1 Schärfe">🚀 Schnell</button>
-        <button type="button" onclick="setQuality(75, 1.0)" style="background:#2563eb; padding:4px 8px; font-size:11px;" title="Gutes Gleichgewicht, gestochen scharf">⚖️ Normal</button>
-        <button type="button" onclick="setQuality(85, 1.0)" style="background:#7c3aed; padding:4px 8px; font-size:11px;" title="Maximale Details & Farben">💎 HQ</button>
+        <button type="button" onclick="setQuality(65, 1.0)" style="background:#059669; padding:4px 8px; font-size:11px;" title="Very fast, native 1:1 sharpness">🚀 Fast</button>
+        <button type="button" onclick="setQuality(75, 1.0)" style="background:#2563eb; padding:4px 8px; font-size:11px;" title="Balanced speed & crisp quality">⚖️ Balanced</button>
+        <button type="button" onclick="setQuality(85, 1.0)" style="background:#7c3aed; padding:4px 8px; font-size:11px;" title="Maximum detail & colors">💎 HQ</button>
         <div style="height: 20px; width: 1px; background: #444; margin: 0 4px;"></div>
-        <button type="button" onclick="sendShortcut('desktop')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Desktop anzeigen / Alle Fenster minimieren (Win+D)">🖥️ Desktop</button>
-        <button type="button" onclick="sendClipboard()" style="background:#374151; padding:4px 8px; font-size:11px;" title="Lokale Zwischenablage an entfernten PC senden">📋 Einfügen</button>
-        <button type="button" onclick="sendShortcut('win_key')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Startmenü öffnen">🪟 Start</button>
-        <button type="button" onclick="sendShortcut('explorer')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Windows Explorer öffnen">📁 Explorer</button>
+        <button type="button" onclick="sendShortcut('desktop')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Show Desktop / Minimize all windows (Win+D)">🖥️ Desktop</button>
+        <button type="button" onclick="sendClipboard()" style="background:#374151; padding:4px 8px; font-size:11px;" title="Send local clipboard text to remote PC">📋 Paste</button>
+        <button type="button" onclick="sendShortcut('win_key')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Open Start Menu">🪟 Start</button>
+        <button type="button" onclick="sendShortcut('explorer')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Open File Explorer">📁 Explorer</button>
       </div>
       <div style="height: 20px; width: 1px; background: #444; margin: 0 4px;"></div>
       <a href="/download/DeskLite.exe" download style="text-decoration:none;">
-        <button type="button" style="background:#10b981;" title="Eigenständige Windows App (.exe) - kein Python nötig">📥 App (.exe)</button>
+        <button type="button" style="background:#10b981;" title="Standalone Windows App (.exe) - no Python required">📥 App (.exe)</button>
       </a>
     </div>
     <div id="status">
       <span id="badge" class="badge"></span>
-      <span id="statusText">Bereit</span>
+      <span id="statusText">Ready</span>
     </div>
   </header>
 
@@ -148,20 +148,20 @@
     <div id="welcomeOverlay" style="text-align:center; padding: 30px; max-width: 600px; background: #262630; border-radius: 12px; border: 1px solid #3d3d4e; box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
       <h2 style="margin-bottom: 12px; color: #60a5fa; font-size: 24px;">⚡ DeskLite</h2>
       <p style="color: #cbd5e1; font-size: 14px; margin-bottom: 24px; line-height: 1.6;">
-        Steuere entfernte PCs direkt in diesem Browserfenster oder lade den Client für deinen PC herunter:
+        Control remote PCs directly in this browser window or download the client for your PC:
       </p>
       <div style="display:flex; justify-content:center; gap: 14px; margin-bottom: 20px; flex-wrap: wrap;">
         <a href="/download/DeskLite.exe" download style="text-decoration:none;">
           <button type="button" style="background:#10b981; padding: 12px 26px; font-size: 15px; border-radius: 6px;">
-            📥 <strong>DeskLite.exe herunterladen</strong><br><small style="opacity:0.85; font-size: 11px;">Eigenständige App für Windows (kein Python nötig)</small>
+            📥 <strong>Download DeskLite.exe</strong><br><small style="opacity:0.85; font-size: 11px;">Standalone Windows App (no Python required)</small>
           </button>
         </a>
       </div>
       <p style="color: #94a3b8; font-size: 12px;">
-        💡 <em>Einfach die Datei herunterladen, starten und die angezeigte ID oben eingeben oder teilen.</em>
+        💡 <em>Simply download, launch the file, and enter or share the displayed ID above.</em>
       </p>
       <div id="recentSection" style="display:none; margin-top:24px; text-align:left; background:#1e1e24; border-radius:8px; padding:12px 16px; border:1px solid #3d3d4e;">
-        <div style="font-weight:600; font-size:12px; color:#94a3b8; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.5px;">🕒 Zuletzt verbundene Partner</div>
+        <div style="font-weight:600; font-size:12px; color:#94a3b8; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.5px;">🕒 Recently Connected Partners</div>
         <div id="recentListContainer" style="display:flex; flex-direction:column; gap:6px;"></div>
       </div>
     </div>
@@ -200,7 +200,7 @@
     function savePartner(id, pwd) {
       if (!id) return;
       let list = getSavedPartners().filter(p => p.id !== id);
-      list.unshift({ id: id, pwd: pwd, date: new Date().toLocaleDateString("de-DE") });
+      list.unshift({ id: id, pwd: pwd, date: new Date().toLocaleDateString("en-US") });
       if (list.length > 8) list = list.slice(0, 8);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
       updateRecentUI();
@@ -249,11 +249,11 @@
           <div style="display:flex; align-items:center; gap:8px;">
             <span style="font-size:16px;">💻</span>
             <span style="font-weight:600; font-family:monospace; font-size:14px; color:#60a5fa;">${p.id}</span>
-            <span style="font-size:11px; color:#94a3b8;">(${p.date || 'Gespeichert'})</span>
+            <span style="font-size:11px; color:#94a3b8;">(${p.date || 'Saved'})</span>
           </div>
           <div style="display:flex; align-items:center; gap:6px;">
-            <button type="button" style="background:#2563eb; padding:4px 10px; font-size:11px; border-radius:4px;" onclick="event.stopPropagation(); selectPartner('${p.id}', '${p.pwd || ''}')">⚡ Verbinden</button>
-            <button type="button" style="background:transparent; color:#9ca3af; border:none; padding:4px 6px; font-size:12px; cursor:pointer;" onclick="removePartner(event, '${p.id}')" title="Löschen">✕</button>
+            <button type="button" style="background:#2563eb; padding:4px 10px; font-size:11px; border-radius:4px;" onclick="event.stopPropagation(); selectPartner('${p.id}', '${p.pwd || ''}')">⚡ Connect</button>
+            <button type="button" style="background:transparent; color:#9ca3af; border:none; padding:4px 6px; font-size:12px; cursor:pointer;" onclick="removePartner(event, '${p.id}')" title="Remove">✕</button>
           </div>
         </div>
       `).join("");
@@ -293,10 +293,10 @@
       const btn = document.getElementById("btnFullscreen");
       if (document.fullscreenElement) {
         document.body.classList.add("is-fullscreen");
-        if (btn) btn.innerText = "✕ Vollbild beenden";
+        if (btn) btn.innerText = "✕ Exit Fullscreen";
       } else {
         document.body.classList.remove("is-fullscreen");
-        if (btn) btn.innerText = "⛶ Vollbild";
+        if (btn) btn.innerText = "⛶ Fullscreen";
       }
     });
 
@@ -316,9 +316,9 @@
         ws.close();
       }
       isConnected = false;
-      btnConnect.innerText = "Verbinden";
+      btnConnect.innerText = "Connect";
       btnConnect.style.background = "#2563eb";
-      setStatus("Getrennt", "");
+      setStatus("Disconnected", "");
       document.getElementById("welcomeOverlay").style.display = "block";
       document.getElementById("qualityControls").style.display = "none";
       canvas.style.display = "none";
@@ -327,7 +327,7 @@
     function setQuality(quality, scale) {
       if (ws && isConnected) {
         ws.send(JSON.stringify({ type: "set_quality", quality: quality, scale: scale }));
-        setStatus(`Profil: ${quality}%, ${Math.round(scale*100)}% Skalierung`, "green");
+        setStatus(`Profile: ${quality}%, ${Math.round(scale*100)}% Scale`, "green");
       }
     }
 
@@ -345,17 +345,17 @@
           text = await navigator.clipboard.readText();
         }
         if (!text) {
-          text = prompt("Text zum Einfügen auf dem entfernten PC:");
+          text = prompt("Enter text to paste on remote PC:");
         }
         if (text) {
           ws.send(JSON.stringify({ type: "clipboard", text: text }));
-          setStatus("📋 Zwischenablage an Host gesendet", "green");
+          setStatus("📋 Clipboard sent to host", "green");
         }
       } catch(e) {
-        let text = prompt("Text zum Einfügen auf dem entfernten PC:");
+        let text = prompt("Enter text to paste on remote PC:");
         if (text && ws && isConnected) {
           ws.send(JSON.stringify({ type: "clipboard", text: text }));
-          setStatus("📋 Zwischenablage an Host gesendet", "green");
+          setStatus("📋 Clipboard sent to host", "green");
         }
       }
     }
@@ -364,7 +364,7 @@
       const targetId = document.getElementById("targetId").value.trim();
       const pwd = document.getElementById("targetPwd").value.trim();
       if (!targetId) {
-        alert("Bitte eine Host-ID eingeben!");
+        alert("Please enter a Host ID!");
         shouldReconnect = false;
         return;
       }
@@ -373,15 +373,15 @@
       const host = location.host || "localhost:8765";
       const wsUrl = `${protocol}//${host}`;
 
-      setStatus("Verbinde mit Server...", "yellow");
-      btnConnect.innerText = "Trennen";
+      setStatus("Connecting to server...", "yellow");
+      btnConnect.innerText = "Disconnect";
       btnConnect.style.background = "#dc2626";
 
       ws = new WebSocket(wsUrl);
       ws.binaryType = "blob";
 
       ws.onopen = () => {
-        setStatus("Authentifiziere...", "yellow");
+        setStatus("Authenticating...", "yellow");
         ws.send(JSON.stringify({
           action: "connect",
           target_id: targetId,
@@ -396,18 +396,18 @@
             if (msg.status === "connected") {
               isConnected = true;
               savePartner(targetId, pwd);
-              setStatus(`Verbunden mit ${targetId}`, "green");
+              setStatus(`Connected to ${targetId}`, "green");
               document.getElementById("welcomeOverlay").style.display = "none";
               document.getElementById("qualityControls").style.display = "flex";
               canvas.style.display = "block";
             } else if (msg.status === "error") {
-              if (msg.message && msg.message.toLowerCase().includes("passwort")) {
+              if (msg.message && (msg.message.toLowerCase().includes("password") || msg.message.toLowerCase().includes("passwort"))) {
                 shouldReconnect = false;
                 alert(msg.message);
                 disconnect();
               } else {
                 // Host temporarily unavailable or busy
-                setStatus(msg.message + " – versuche erneut in 2s...", "yellow");
+                setStatus(msg.message + " – retrying in 2s...", "yellow");
               }
             } else if (msg.type === "screen_info") {
               remoteWidth = msg.width;
@@ -415,13 +415,13 @@
               canvas.width = remoteWidth;
               canvas.height = remoteHeight;
             } else if (msg.type === "host_disconnected") {
-              setStatus("Host getrennt – warte auf Wiederverbindung...", "yellow");
+              setStatus("Host disconnected – waiting for reconnect...", "yellow");
             } else if (msg.type === "clipboard") {
               if (msg.text) {
                 if (navigator.clipboard && navigator.clipboard.writeText) {
                   navigator.clipboard.writeText(msg.text).catch(() => {});
                 }
-                setStatus("📋 Zwischenablage vom Host übernommen", "green");
+                setStatus("📋 Clipboard synced from host", "green");
               }
             }
           } catch(e) {}
@@ -454,7 +454,7 @@
 
       ws.onclose = () => {
         if (shouldReconnect) {
-          setStatus("Verbindung unterbrochen – verbinde automatisch in 2s neu...", "yellow");
+          setStatus("Connection lost – reconnecting in 2s...", "yellow");
           setTimeout(() => {
             if (shouldReconnect) {
               connect();
@@ -462,14 +462,14 @@
           }, 2000);
         } else {
           isConnected = false;
-          btnConnect.innerText = "Verbinden";
+          btnConnect.innerText = "Connect";
           btnConnect.style.background = "#2563eb";
-          setStatus("Getrennt", "");
+          setStatus("Disconnected", "");
         }
       };
 
       ws.onerror = (e) => {
-        setStatus("Verbindungsfehler", "");
+        setStatus("Connection error", "");
       };
     }
 
@@ -542,7 +542,7 @@
       const text = (e.clipboardData || window.clipboardData).getData("text");
       if (text) {
         ws.send(JSON.stringify({ type: "clipboard", text: text }));
-        setStatus("📋 Zwischenablage an Host gesendet", "green");
+        setStatus("📋 Clipboard sent to host", "green");
       }
     });
   </script>

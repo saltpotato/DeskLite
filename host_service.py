@@ -59,7 +59,7 @@ class HostService:
             try:
                 self.loop.run_until_complete(self._connect_and_serve())
             except Exception as e:
-                logging.warning(f"Verbindungsunterbrechung zum Relay: {e}")
+                logging.warning(f"Disconnected from relay: {e}")
                 self.set_status("disconnected", str(e))
                 time.sleep(2) # Auto-reconnect after 2 seconds
 
@@ -75,7 +75,7 @@ class HostService:
                 consecutive_errors = 0
             except Exception as e:
                 consecutive_errors += 1
-                logging.debug(f"Capture-Fehler (vorübergehend): {e}")
+                logging.debug(f"Capture error (transient): {e}")
                 frame_bytes = None
                 if consecutive_errors > 30:
                     break
@@ -86,7 +86,7 @@ class HostService:
                 try:
                     await ws.send(frame_bytes)
                 except Exception as e:
-                    logging.debug(f"Stream-Netzwerkfehler: {e}")
+                    logging.debug(f"Stream network error: {e}")
                     break
             
             elapsed = time.time() - start_t
@@ -108,7 +108,7 @@ class HostService:
             await asyncio.sleep(0.8)
 
     async def _connect_and_serve(self):
-        self.set_status("connecting", "Verbinde mit Relay-Server...")
+        self.set_status("connecting", "Connecting to relay server...")
         async with websockets.connect(
             self.relay_url,
             max_size=20 * 1024 * 1024,
@@ -128,11 +128,11 @@ class HostService:
             resp_str = await ws.recv()
             resp = json.loads(resp_str)
             if resp.get("status") != "registered":
-                self.set_status("error", resp.get("message", "Registrierung fehlgeschlagen"))
+                self.set_status("error", resp.get("message", "Registration failed"))
                 return
             
-            logging.info(f"Erfolgreich als Host '{self.my_id}' registriert!")
-            self.set_status("online", f"Bereit für Verbindungen (ID: {self.my_id})")
+            logging.info(f"Successfully registered as host '{self.my_id}'!")
+            self.set_status("online", f"Ready for connections (ID: {self.my_id})")
 
             stream_task = None
             clip_task = None
@@ -145,8 +145,8 @@ class HostService:
                         
                         if msg_type == "viewer_connected":
                             self.active_viewers += 1
-                            logging.info(f"Viewer verbunden! Aktive Viewer: {self.active_viewers}")
-                            self.set_status("busy", f"Fernsteuerung aktiv ({self.active_viewers} Viewer)")
+                            logging.info(f"Viewer connected! Active viewers: {self.active_viewers}")
+                            self.set_status("busy", f"Remote session active ({self.active_viewers} viewer{'s' if self.active_viewers != 1 else ''})")
                             # Send initial screen info
                             info = {
                                 "type": "screen_info",
@@ -165,9 +165,9 @@ class HostService:
 
                         elif msg_type == "viewer_disconnected":
                             self.active_viewers = max(0, self.active_viewers - 1)
-                            logging.info(f"Viewer getrennt. Aktive Viewer: {self.active_viewers}")
+                            logging.info(f"Viewer disconnected. Active viewers: {self.active_viewers}")
                             if self.active_viewers == 0:
-                                self.set_status("online", f"Bereit für Verbindungen (ID: {self.my_id})")
+                                self.set_status("online", f"Ready for connections (ID: {self.my_id})")
                                 if stream_task and not stream_task.done():
                                     stream_task.cancel()
                                 if clip_task and not clip_task.done():
@@ -178,7 +178,7 @@ class HostService:
                             if text and text != self.last_clipboard:
                                 self.last_clipboard = text
                                 set_clipboard_text(text)
-                                logging.info("Zwischenablage vom Viewer übernommen.")
+                                logging.info("Clipboard received from viewer.")
 
                         elif msg_type == "input":
                             evt_data = data.get("data", {})
@@ -187,7 +187,7 @@ class HostService:
                             
                             # Auto-revive stream_task if it died unexpectedly during idle
                             if self.active_viewers > 0 and (stream_task is None or stream_task.done()):
-                                logging.info("Reaktiviere Desktop-Stream nach Inaktivität...")
+                                logging.info("Reviving desktop stream after idle...")
                                 stream_task = asyncio.create_task(self._stream_frames(ws))
 
                         elif msg_type == "set_quality":
@@ -196,7 +196,7 @@ class HostService:
                                 scale=data.get("scale")
                             )
                             self.force_frame = True
-                            logging.info(f"Qualitätsprofil geändert: scale={self.capturer.scale}, q={self.capturer.quality}")
+                            logging.info(f"Quality profile updated: scale={self.capturer.scale}, q={self.capturer.quality}")
 
                     except Exception as e:
-                        logging.warning(f"Fehler beim Verarbeiten von Steuerungsdaten: {e}")
+                        logging.warning(f"Error processing control input: {e}")

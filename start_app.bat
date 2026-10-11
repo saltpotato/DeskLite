@@ -19,5 +19,5 @@ if exist "%~dp0DeskLite.exe" (
 )
 
 echo.
-echo Fehler beim Starten von DeskLite.
+echo Failed to start DeskLite.
 pause

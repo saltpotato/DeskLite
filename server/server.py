@@ -73,7 +73,7 @@ def process_http_request(connection, request):
                 status_code=404,
                 reason_phrase="Not Found",
                 headers=Headers([("Content-Type", "text/plain")]),
-                body=b"Datei nicht gefunden"
+                body=b"File not found"
             )
 
     return None # Proceed to WebSocket upgrade
@@ -84,7 +84,7 @@ async def handle_websocket(websocket):
     try:
         # First message must be registration or connection request
         first_msg = await websocket.recv()
-        logging.info(f"[WS-IN] Erste Nachricht: {first_msg}")
+        logging.info(f"[WS-IN] First message: {first_msg}")
         data = json.loads(first_msg)
         action = data.get("action")
         raw_id = str(data.get("id", "")).replace(" ", "").strip()
@@ -95,12 +95,12 @@ async def handle_websocket(websocket):
             role = "host"
             peer_id = raw_id
             if not peer_id:
-                await websocket.send(json.dumps({"status": "error", "message": "ID erforderlich"}))
+                await websocket.send(json.dumps({"status": "error", "message": "ID required"}))
                 return
 
             hosts[peer_id] = websocket
             peer_auth[peer_id] = pwd
-            logging.info(f"[+] Host registriert: ID '{peer_id}'")
+            logging.info(f"[+] Host registered: ID '{peer_id}'")
             await websocket.send(json.dumps({"status": "registered", "id": peer_id}))
 
             async for message in websocket:
@@ -120,17 +120,17 @@ async def handle_websocket(websocket):
             # VIEWER connecting to host
             role = "viewer"
             target_id = str(data.get("target_id", "")).replace(" ", "").strip()
-            logging.info(f"[?] Viewer will verbinden mit '{target_id}'. Registrierte Hosts: {list(hosts.keys())}")
+            logging.info(f"[?] Viewer requesting connection to '{target_id}'. Registered hosts: {list(hosts.keys())}")
 
             if target_id not in hosts:
-                logging.info(f"[-] Host '{target_id}' nicht online")
-                await websocket.send(json.dumps({"status": "error", "message": f"Host '{target_id}' ist nicht online."}))
+                logging.info(f"[-] Host '{target_id}' is not online")
+                await websocket.send(json.dumps({"status": "error", "message": f"Host '{target_id}' is not online."}))
                 return
 
             expected_pwd = peer_auth.get(target_id, "")
             if expected_pwd and pwd != expected_pwd:
-                logging.info(f"[-] Falsches Passwort für Host '{target_id}' (erwartet: '{expected_pwd}', erhalten: '{pwd}')")
-                await websocket.send(json.dumps({"status": "error", "message": "Falsches Passwort."}))
+                logging.info(f"[-] Invalid password for host '{target_id}'")
+                await websocket.send(json.dumps({"status": "error", "message": "Invalid password."}))
                 return
 
             if target_id not in viewers:
@@ -138,7 +138,7 @@ async def handle_websocket(websocket):
             viewers[target_id].append(websocket)
             host_ws = hosts[target_id]
 
-            logging.info(f"[+] Viewer verbunden mit Host: ID '{target_id}'")
+            logging.info(f"[+] Viewer connected to host: ID '{target_id}'")
             await websocket.send(json.dumps({"status": "connected", "target_id": target_id}))
             
             # Notify host that viewer joined
@@ -158,13 +158,13 @@ async def handle_websocket(websocket):
     except websockets.exceptions.ConnectionClosed as e:
         logging.info(f"[WS-CLOSED] Role '{role}', Peer '{peer_id}': code={e.code}, reason={e.reason}")
     except Exception as e:
-        logging.exception(f"[WS-ERR] Fehler bei Peer '{peer_id}': {e}")
+        logging.exception(f"[WS-ERR] Error for peer '{peer_id}': {e}")
     finally:
         if role == "host" and peer_id in hosts:
             if hosts[peer_id] == websocket:
                 del hosts[peer_id]
                 peer_auth.pop(peer_id, None)
-                logging.info(f"[-] Host getrennt: ID '{peer_id}'")
+                logging.info(f"[-] Host disconnected: ID '{peer_id}'")
                 if peer_id in viewers:
                     for v_ws in list(viewers[peer_id]):
                         try:
@@ -175,7 +175,7 @@ async def handle_websocket(websocket):
             for t_id, v_list in list(viewers.items()):
                 if websocket in v_list:
                     v_list.remove(websocket)
-                    logging.info(f"[-] Viewer getrennt von ID '{t_id}'")
+                    logging.info(f"[-] Viewer disconnected from ID '{t_id}'")
                     if t_id in hosts:
                         try:
                             await hosts[t_id].send(json.dumps({"type": "viewer_disconnected"}))
@@ -183,7 +183,7 @@ async def handle_websocket(websocket):
                             pass
 
 async def main():
-    logging.info(f"Relay & Handshake Server startet auf 0.0.0.0:{HOST_PORT}...")
+    logging.info(f"DeskLite Relay Server starting on 0.0.0.0:{HOST_PORT}...")
     async with websockets.serve(
         handle_websocket,
         "0.0.0.0",
@@ -199,4 +199,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.info("Server beendet.")
+        logging.info("Server stopped.")

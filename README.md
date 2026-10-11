@@ -1,29 +1,29 @@
 # ⚡ DeskLite - Remote Desktop
 
-Ein schlankes, leichtgewichtiges Remote-Desktop-System in Python – mit Desktop-App und direktem HTML5-Web-Viewer im Browser.
+A lightweight, fast Remote Desktop system built in Python — featuring a native desktop app and a zero-install HTML5 web viewer in the browser.
 
 ---
 
 ## ✨ Features
 
-- **Desktop-App & HTML5-Web-Viewer:** Entweder über die schlanke Python/Windows-App nutzen oder direkt ohne Installation im Browser (`http://<dein-vps>:8765`) fernsteuern.
-- **Native 1:1 Darstellung & Qualitätsprofile:** Drei umschaltbare Profile (**🚀 Schnell**, **⚖️ Normal**, **💎 HQ**) mit gestochen scharfer 1:1-Auflösung und OpenCV-gestützter Differenzbild-Erkennung für niedrige Bandbreite.
-- **Immersiver Vollbildmodus:** Echtes Vollbild im Browser und Desktop-Viewer mit automatisch ausblendender Floating-Toolbar am oberen Bildschirmrand.
-- **Zwischenablage-Synchronisation (Clipboard):** Kopierter Text wird zwischen Host und Viewer/Browser übertragen (`Strg+C` / `Strg+V` bzw. **📋 Einfügen**-Button).
-- **Quick-Shortcuts in der Toolbar:** Schnellzugriff auf **🖥️ Desktop (Win+D)**, **🪟 Startmenü**, **📁 Explorer** und **⚡ Task-Manager**.
-- **Partner-Historie:** Zuletzt verbundene Partner-IDs werden lokal gespeichert und können mit einem Klick wiederverbunden werden.
-- **Admin- & UAC-Unterstützung (Windows):** Läuft ohne Konsolenfenster im Hintergrund und unterstützt die Steuerung von erhöhten Fenstern sowie UAC-Abfragen.
-- **Auto-Reconnect:** Automatische Wiederverbindung bei kurzen Netzwerkunterbrechungen.
-- **Standalone `.exe` Generator:** Über `build.ps1` lässt sich eine eigenständige `DeskLite.exe` bauen (keine Python-Installation auf dem Zielgerät nötig), die auch direkt über das Web-Interface heruntergeladen werden kann.
+- **Desktop App & HTML5 Web Viewer:** Control remote machines using the lightweight Python/Windows desktop app or directly from any browser (`http://<your-server>:8765`).
+- **Native 1:1 Sharpness & Quality Profiles:** Switch live between three profiles (**🚀 Fast**, **⚖️ Balanced**, **💎 HQ**) with crisp 1:1 native resolution and OpenCV-powered frame-diffing for low bandwidth usage.
+- **Immersive Fullscreen Mode:** True `100vw × 100vh` fullscreen in both browser and desktop viewer with an auto-hiding floating top toolbar that slides down on hover.
+- **Clipboard Synchronization:** Bi-directional text clipboard sync between host and viewer/browser (`Ctrl+C` / `Ctrl+V` or the **📋 Paste** toolbar button).
+- **Quick Toolbar Shortcuts:** One-click shortcuts for **🖥️ Show Desktop (`Win+D`)**, **🪟 Start Menu**, **📁 File Explorer**, and **⚡ Task Manager**.
+- **Recent Partners History:** Automatically remembers recently connected Partner IDs for one-click reconnection.
+- **Admin & UAC Support (Windows):** Runs windowless in the background (`pythonw.exe`) and supports interacting with elevated windows and UAC prompts.
+- **Auto-Reconnect:** Automatically reconnects on brief network interruptions.
+- **Standalone `.exe` Builder:** Includes `build.ps1` to package a standalone `DeskLite.exe` binary (no Python installation required on target PCs) with a direct download button in the web interface.
 
 ---
 
-## 🛠️ Architektur
+## 🛠️ Architecture
 
 ```
 [ Host PC ]                               [ Viewer PC / Browser ]
      │                                               │
-     │ (WebSocket-Verbindung)                        │ (WebSocket-Verbindung)
+     │ (WebSocket Connection)                        │ (WebSocket Connection)
      ▼                                               ▼
 ┌─────────────────────────────────────────────────────────┐
 │             DeskLite Relay Server (Docker)              │
@@ -33,52 +33,53 @@ Ein schlankes, leichtgewichtiges Remote-Desktop-System in Python – mit Desktop
 
 ---
 
-## 🚀 1. Relay-Server starten (Docker)
+## 🚀 1. Start the Relay Server (Docker)
 
-Kopiere den Ordner `server/` auf deinen Server oder klone das Repository dort hin:
+Copy the `server/` directory to your server or clone the repository there:
 
 ```bash
 cd server
 docker compose up -d --build
 ```
 
-Der Server stellt auf Port `8765` sowohl den WebSocket-Relay als auch das HTML5-Web-Interface bereit.  
-*(Optional kann ein Reverse-Proxy wie Nginx oder Caddy mit HTTPS/WSS vorgeschaltet werden).*
+The server listens on port `8765` and serves both the WebSocket relay and the HTML5 Web Viewer.  
+*(Optional: Put a reverse proxy like Nginx or Caddy in front of it for HTTPS / `wss://`.)*
 
 ---
 
-## 💻 2. Client starten oder `.exe` bauen
+## 💻 2. Run the Client or Build `DeskLite.exe`
 
-### Direkt mit Python starten
-1. **Voraussetzungen:** Python 3.10+
-2. **Abhängigkeiten installieren (einmalig):**
+### Run directly with Python
+1. **Prerequisites:** Python 3.10+
+2. **Install dependencies (once):**
    ```bash
    pip install -r requirements.txt
    ```
-3. **Starten:**
-   - Unter Windows per Doppelklick auf `start_app.bat` (startet ohne Konsolenfenster) oder:
+3. **Start:**
+   - On Windows, double-click `start_app.bat` (launches without a console window) or run:
    ```bash
    pythonw main.py
    ```
 
-### Eigenständige `DeskLite.exe` erstellen (optional)
-Mit dem mitgelieferten PowerShell-Skript wird eine portable Einzeldatei (`DeskLite.exe`) gebaut, in der die Server-Adresse bereits hinterlegt ist:
+### Build a standalone `DeskLite.exe` (optional)
+Use the included PowerShell script to build a single-file portable `DeskLite.exe` with your relay server URL pre-configured:
 ```powershell
-.\build.ps1 -ServerUrl "ws://DEINE_SERVER_IP:8765"
+.\build.ps1
 ```
-Die erzeugte Datei liegt anschließend unter `server/web/download/DeskLite.exe` und kann auf das Web-Interface hochgeladen werden.
+The compiled binary is placed in `server/web/download/DeskLite.exe` so it can be downloaded directly from the web viewer.
 
 ---
 
-## 🎮 3. Bedienung
+## 🎮 3. Usage
 
-1. **Relay-Server einstellen:**
-   - Unten im Feld *Relay-Server* die Adresse eintragen (`ws://DEINE_SERVER_IP:8765` oder `wss://deine-domain.de`) und auf **Speichern** klicken.
-2. **Diesen PC freigeben (Host):**
-   - Links werden deine **6-stellige ID** (z. B. `384 192`) und das **Einmalkennwort** angezeigt.
-   - Über **🔄 Neu** lassen sich jederzeit eine neue ID oder ein neues Passwort generieren.
-   - Über den UAC-Button unten lässt sich bei Bedarf die Windows-Bildschirmabdunkelung bei UAC-Dialogen umschalten, damit Abfragen im Stream sichtbar und klickbar bleiben.
-3. **Partner steuern (Viewer / Browser):**
-   - In der Desktop-App rechts oder im Browser unter `http://DEINE_SERVER_IP:8765` die **Partner-ID** und das Passwort eingeben und auf **Verbinden** klicken.
-   - Im Vollbildmodus (`⛶ Vollbild`) blendet sich die obere Leiste automatisch aus und klappt wieder herunter, sobald man mit der Maus an den oberen Bildschirmrand fährt.
+1. **Configure Relay Server:**
+   - Enter your server address in the *Relay Server* field at the bottom (`ws://YOUR_SERVER_IP:8765` or `wss://your-domain.com`) and click **Save**.
+2. **Share This PC (Host):**
+   - Your **6-digit ID** (e.g. `384 192`) and **One-Time Password** are displayed on the left card.
+   - Click **🔄 New** at any time to generate a new ID or password.
+   - Use the UAC button at the bottom to toggle Windows Secure Desktop dimming so UAC prompts remain visible and clickable in the remote stream.
+3. **Control a Remote PC (Viewer / Browser):**
+   - Enter the **Partner ID** and password on the right card of the desktop app (or in your browser at `http://YOUR_SERVER_IP:8765`) and click **Connect**.
+   - In fullscreen mode (`⛶ Fullscreen`), the top bar hides automatically and reappears when moving the cursor to the top edge of the screen.
+
 

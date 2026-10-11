@@ -19,7 +19,7 @@ class RemoteDesktopViewer(tk.Toplevel):
         self.target_id = target_id
         self.password = password
         
-        self.title(f"Fernsteuerung: {target_id}")
+        self.title(f"Remote Session: {target_id}")
         self.geometry("1280x720")
         self.minsize(640, 480)
         
@@ -61,10 +61,10 @@ class RemoteDesktopViewer(tk.Toplevel):
         self.toolbar = tk.Frame(self, bg="#2c3e50", height=32)
         self.toolbar.pack(fill=tk.X, side=tk.TOP)
         
-        self.status_label = tk.Label(self.toolbar, text="Verbinde...", bg="#2c3e50", fg="white", font=("Segoe UI", 9))
+        self.status_label = tk.Label(self.toolbar, text="Connecting...", bg="#2c3e50", fg="white", font=("Segoe UI", 9))
         self.status_label.pack(side=tk.LEFT, padx=10, pady=4)
         
-        self.btn_fullscreen = tk.Button(self.toolbar, text="⛶ Vollbild", bg="#34495e", fg="white",
+        self.btn_fullscreen = tk.Button(self.toolbar, text="⛶ Fullscreen", bg="#34495e", fg="white",
                                         relief=tk.FLAT, font=("Segoe UI", 8), command=self.toggle_fullscreen)
         self.btn_fullscreen.pack(side=tk.RIGHT, padx=4, pady=4)
 
@@ -72,7 +72,7 @@ class RemoteDesktopViewer(tk.Toplevel):
                                      relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.send_shortcut("desktop"))
         self.btn_desktop.pack(side=tk.RIGHT, padx=3, pady=4)
 
-        self.btn_clip = tk.Button(self.toolbar, text="📋 Einfügen", bg="#34495e", fg="white",
+        self.btn_clip = tk.Button(self.toolbar, text="📋 Paste", bg="#34495e", fg="white",
                                   relief=tk.FLAT, font=("Segoe UI", 8), command=self.send_clipboard_to_host)
         self.btn_clip.pack(side=tk.RIGHT, padx=3, pady=4)
         self.btn_explorer = tk.Button(self.toolbar, text="📁 Explorer", bg="#34495e", fg="white",
@@ -83,7 +83,7 @@ class RemoteDesktopViewer(tk.Toplevel):
                                  relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.send_shortcut("win_key"))
         self.btn_win.pack(side=tk.RIGHT, padx=3, pady=4)
 
-        self.btn_ctrl_alt_del = tk.Button(self.toolbar, text="Ctrl+Alt+Entf", bg="#34495e", fg="white",
+        self.btn_ctrl_alt_del = tk.Button(self.toolbar, text="Ctrl+Alt+Del", bg="#34495e", fg="white",
                                           relief=tk.FLAT, font=("Segoe UI", 8), command=self.send_ctrl_alt_del)
         self.btn_ctrl_alt_del.pack(side=tk.RIGHT, padx=3, pady=4)
 
@@ -91,11 +91,11 @@ class RemoteDesktopViewer(tk.Toplevel):
                                 relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.set_quality(85, 1.0))
         self.btn_hq.pack(side=tk.RIGHT, padx=3, pady=4)
 
-        self.btn_balanced = tk.Button(self.toolbar, text="⚖️ Normal", bg="#2980b9", fg="white",
+        self.btn_balanced = tk.Button(self.toolbar, text="⚖️ Balanced", bg="#2980b9", fg="white",
                                       relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.set_quality(75, 1.0))
         self.btn_balanced.pack(side=tk.RIGHT, padx=3, pady=4)
 
-        self.btn_fast = tk.Button(self.toolbar, text="🚀 Schnell", bg="#27ae60", fg="white",
+        self.btn_fast = tk.Button(self.toolbar, text="🚀 Fast", bg="#27ae60", fg="white",
                                   relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.set_quality(65, 1.0))
         self.btn_fast.pack(side=tk.RIGHT, padx=3, pady=4)
 
@@ -142,7 +142,7 @@ class RemoteDesktopViewer(tk.Toplevel):
             self.last_clipboard = text
             msg = json.dumps({"type": "clipboard", "text": text})
             asyncio.run_coroutine_threadsafe(self._ws_send(msg), self.loop)
-            self.status_label.config(text="📋 Zwischenablage an Host gesendet")
+            self.status_label.config(text="📋 Clipboard sent to host")
 
     def _check_clipboard_sync(self):
         cur = get_clipboard_text()
@@ -161,7 +161,7 @@ class RemoteDesktopViewer(tk.Toplevel):
         if self.ws and self.loop and self.loop.is_running():
             msg = json.dumps({"type": "set_quality", "quality": quality, "scale": scale})
             asyncio.run_coroutine_threadsafe(self._ws_send(msg), self.loop)
-            self.status_label.config(text=f"Modus aktiv: Qualität {quality}%, Skalierung {int(scale*100)}%")
+            self.status_label.config(text=f"Profile active: Quality {quality}%, Scale {int(scale*100)}%")
 
     def on_canvas_resize(self, event):
         self.canvas_w = event.width
@@ -229,9 +229,9 @@ class RemoteDesktopViewer(tk.Toplevel):
             try:
                 self.loop.run_until_complete(self._connect_and_view())
             except Exception as e:
-                logging.debug(f"Verbindungsfehler: {e}")
+                logging.debug(f"Connection error: {e}")
             if self.running:
-                self.after(0, lambda: self.status_label.config(text="🟡 Verbindung unterbrochen – verbinde automatisch in 2s neu..."))
+                self.after(0, lambda: self.status_label.config(text="🟡 Connection lost – reconnecting in 2s..."))
                 time.sleep(2)
 
     async def _connect_and_view(self):
@@ -253,15 +253,15 @@ class RemoteDesktopViewer(tk.Toplevel):
                 resp_str = await ws.recv()
                 resp = json.loads(resp_str)
                 if resp.get("status") != "connected":
-                    err_msg = resp.get("message", "Verbindung abgelehnt")
-                    if "passwort" in err_msg.lower():
+                    err_msg = resp.get("message", "Connection refused")
+                    if "password" in err_msg.lower() or "passwort" in err_msg.lower():
                         self.running = False
                         self.after(0, lambda: self._show_error(err_msg))
                         return
                     # Host momentarily offline, will retry
                     return
 
-                self.after(0, lambda: self.status_label.config(text=f"Verbunden mit {self.target_id}"))
+                self.after(0, lambda: self.status_label.config(text=f"Connected to {self.target_id}"))
 
                 async for message in ws:
                     if not self.running:
@@ -281,14 +281,14 @@ class RemoteDesktopViewer(tk.Toplevel):
                                 self.remote_width = meta.get("width", 1920)
                                 self.remote_height = meta.get("height", 1080)
                             elif meta.get("type") == "host_disconnected":
-                                self.after(0, lambda: self.status_label.config(text="🟡 Host kurz getrennt – warte auf Wiederverbindung..."))
+                                self.after(0, lambda: self.status_label.config(text="🟡 Host disconnected – waiting for reconnect..."))
                                 break
                             elif meta.get("type") == "clipboard":
                                 text = meta.get("text", "")
                                 if text and text != self.last_clipboard:
                                     self.last_clipboard = text
                                     set_clipboard_text(text)
-                                    self.after(0, lambda: self.status_label.config(text="📋 Zwischenablage vom Host übernommen"))
+                                    self.after(0, lambda: self.status_label.config(text="📋 Clipboard synced from host"))
                         except Exception:
                             pass
         except Exception:
@@ -338,14 +338,14 @@ class RemoteDesktopViewer(tk.Toplevel):
                 self.fps_display = self.fps_count
                 self.fps_count = 0
                 self.fps_timer = now
-                fps_text = f"Verbunden mit {self.target_id} | {self.remote_width}x{self.remote_height} | {self.fps_display} FPS (Niedrige Latenz)"
+                fps_text = f"Connected to {self.target_id} | {self.remote_width}x{self.remote_height} | {self.fps_display} FPS (Low Latency)"
                 self.status_label.config(text=fps_text)
 
         except Exception as e:
-            logging.debug(f"Frame-Decodierfehler: {e}")
+            logging.debug(f"Frame decode error: {e}")
 
     def _show_error(self, message):
-        messagebox.showerror("Verbindungsfehler", message, parent=self)
+        messagebox.showerror("Connection Error", message, parent=self)
         self.destroy()
 
     def on_close(self):
