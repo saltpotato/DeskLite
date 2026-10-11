@@ -87,17 +87,41 @@
     }
     .badge.green { background: #10b981; }
     .badge.yellow { background: #f59e0b; }
+
+    /* Immersiver Vollbildmodus wie bei RustDesk / AnyDesk */
+    body.is-fullscreen header {
+      position: fixed;
+      top: 0;
+      left: 50%;
+      transform: translateX(-50%) translateY(-90%);
+      background: rgba(18, 18, 24, 0.92);
+      backdrop-filter: blur(8px);
+      border-radius: 0 0 10px 10px;
+      border: 1px solid #444;
+      border-top: none;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6);
+      transition: transform 0.25s ease;
+      opacity: 0.15;
+    }
+    body.is-fullscreen header:hover {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
+    }
+    body.is-fullscreen #viewport {
+      width: 100vw;
+      height: 100vh;
+    }
   </style>
 </head>
 <body>
-  <header>
+  <header id="mainHeader">
     <h1>⚡ DeskLite</h1>
     <div class="controls">
       <input type="text" id="targetId" list="recentPartnersList" placeholder="Host-ID (z. B. 123 456)" size="14" oninput="onTargetIdInput()">
       <datalist id="recentPartnersList"></datalist>
       <input type="password" id="targetPwd" placeholder="Passwort" size="10">
       <button id="btnConnect" onclick="toggleConnect()">Verbinden</button>
-      <button onclick="document.body.requestFullscreen()">⛶ Vollbild</button>
+      <button id="btnFullscreen" type="button" onclick="toggleFullscreen()">⛶ Vollbild</button>
       <div id="qualityControls" style="display:none; align-items:center; gap:4px;">
         <div style="height: 20px; width: 1px; background: #444; margin: 0 2px;"></div>
         <button type="button" onclick="setQuality(65, 1.0)" style="background:#059669; padding:4px 8px; font-size:11px;" title="Sehr schnell, native 1:1 Schärfe">🚀 Schnell</button>
@@ -254,6 +278,27 @@
       statusText.innerText = text;
       badge.className = "badge " + (type || "");
     }
+
+    function toggleFullscreen() {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      } else {
+        if (document.exitFullscreen) {
+          document.exitFullscreen().catch(() => {});
+        }
+      }
+    }
+
+    document.addEventListener("fullscreenchange", () => {
+      const btn = document.getElementById("btnFullscreen");
+      if (document.fullscreenElement) {
+        document.body.classList.add("is-fullscreen");
+        if (btn) btn.innerText = "✕ Vollbild beenden";
+      } else {
+        document.body.classList.remove("is-fullscreen");
+        if (btn) btn.innerText = "⛶ Vollbild";
+      }
+    });
 
     function toggleConnect() {
       if (isConnected || shouldReconnect) {

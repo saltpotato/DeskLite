@@ -148,9 +148,9 @@ class DeskLiteApp:
             self.btn_service = ttk.Button(service_row, text="⚙️ Als Windows-Dienst einrichten (SYSTEM)", command=self.toggle_windows_service)
             self.btn_service.pack(side=tk.LEFT)
 
-        if not common.get_uac_auto_elevate():
-            self.btn_uac = ttk.Button(service_row, text="🛡️ UAC-Fernsteuerung aktivieren", command=self.enable_uac_remote)
-            self.btn_uac.pack(side=tk.LEFT, padx=8)
+        uac_text = "↩️ UAC auf Standard zurücksetzen" if common.get_uac_auto_elevate() else "🛡️ UAC-Bypass einschalten"
+        self.btn_uac = ttk.Button(service_row, text=uac_text, command=self.toggle_uac_setting)
+        self.btn_uac.pack(side=tk.LEFT, padx=8)
 
         # Status text
         self.lbl_status = ttk.Label(bottom_frame, text="🟡 Initialisiere...", style="Status.TLabel")
@@ -227,13 +227,23 @@ class DeskLiteApp:
         if self.host_service:
             self.host_service.capturer.update_settings(quality=self.config["quality"], scale=self.config["scale"])
 
-    def enable_uac_remote(self):
-        if common.set_uac_auto_elevate(True):
-            messagebox.showinfo("UAC-Fernsteuerung aktiv", "Erfolgreich! Administrative Aktionen werden ab sofort ohne blockierende Dialogbox direkt ausgeführt. Remote-Steuerung funktioniert uneingeschränkt!")
-            if hasattr(self, "btn_uac"):
-                self.btn_uac.config(text="✅ UAC-Bypass aktiv", state="disabled")
+    def toggle_uac_setting(self):
+        currently_auto = common.get_uac_auto_elevate()
+        if currently_auto:
+            # Turn it back to Windows standard (show dialogs)
+            if common.set_uac_auto_elevate(False):
+                messagebox.showinfo("UAC zurückgesetzt", "UAC-Bestätigungen sind wieder aktiv (Standard-Windows-Verhalten: Dialoge werden normal angezeigt).")
+                if hasattr(self, "btn_uac"):
+                    self.btn_uac.config(text="🛡️ UAC-Bypass einschalten")
+            else:
+                messagebox.showerror("Fehler", "Konnte Einstellung nicht ändern (Admin-Rechte erforderlich).")
         else:
-            messagebox.showerror("Fehler", "Konnte UAC-Einstellung nicht ändern (Administrator-Rechte erforderlich).")
+            if common.set_uac_auto_elevate(True):
+                messagebox.showinfo("UAC-Bypass aktiv", "UAC-Bypass aktiviert: Admin-Aktionen werden direkt ausgeführt.")
+                if hasattr(self, "btn_uac"):
+                    self.btn_uac.config(text="↩️ UAC auf Standard zurücksetzen")
+            else:
+                messagebox.showerror("Fehler", "Konnte Einstellung nicht ändern (Admin-Rechte erforderlich).")
 
     def on_partner_selected(self, event=None):
         pid = self.entry_partner_id.get().strip()
