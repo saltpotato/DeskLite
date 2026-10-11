@@ -1,4 +1,5 @@
 import sys
+import ctypes
 import pynput
 from pynput.mouse import Button, Controller as MouseController
 from pynput.keyboard import Key, Controller as KeyboardController
@@ -63,24 +64,49 @@ class InputController:
             ny = event.get("y", 0.0)
             target_x = self.left + int(nx * self.width)
             target_y = self.top + int(ny * self.height)
-            self.mouse.position = (target_x, target_y)
+            if sys.platform == "win32":
+                ctypes.windll.user32.SetCursorPos(target_x, target_y)
+            else:
+                self.mouse.position = (target_x, target_y)
 
         elif evt_type == "mouse_down":
-            btn = BUTTONS.get(event.get("button", "left"), Button.left)
-            self.mouse.press(btn)
+            btn = event.get("button", "left")
+            if sys.platform == "win32":
+                flag = 0x0002 if btn == "left" else (0x0008 if btn == "right" else 0x0020)
+                ctypes.windll.user32.mouse_event(flag, 0, 0, 0, 0)
+            else:
+                p_btn = BUTTONS.get(btn, Button.left)
+                self.mouse.press(p_btn)
 
         elif evt_type == "mouse_up":
-            btn = BUTTONS.get(event.get("button", "left"), Button.left)
-            self.mouse.release(btn)
+            btn = event.get("button", "left")
+            if sys.platform == "win32":
+                flag = 0x0004 if btn == "left" else (0x0010 if btn == "right" else 0x0040)
+                ctypes.windll.user32.mouse_event(flag, 0, 0, 0, 0)
+            else:
+                p_btn = BUTTONS.get(btn, Button.left)
+                self.mouse.release(p_btn)
 
         elif evt_type == "mouse_click":
-            btn = BUTTONS.get(event.get("button", "left"), Button.left)
-            self.mouse.click(btn, event.get("count", 1))
+            btn = event.get("button", "left")
+            count = event.get("count", 1)
+            if sys.platform == "win32":
+                down_flag = 0x0002 if btn == "left" else (0x0008 if btn == "right" else 0x0020)
+                up_flag = 0x0004 if btn == "left" else (0x0010 if btn == "right" else 0x0040)
+                for _ in range(count):
+                    ctypes.windll.user32.mouse_event(down_flag, 0, 0, 0, 0)
+                    ctypes.windll.user32.mouse_event(up_flag, 0, 0, 0, 0)
+            else:
+                p_btn = BUTTONS.get(btn, Button.left)
+                self.mouse.click(p_btn, count)
 
         elif evt_type == "mouse_wheel":
             dy = event.get("delta", 0)
-            # pynput scroll expects dx, dy
-            self.mouse.scroll(0, dy)
+            if sys.platform == "win32":
+                # MOUSEEVENTF_WHEEL = 0x0800, 1 wheel tick = WHEEL_DELTA (120)
+                ctypes.windll.user32.mouse_event(0x0800, 0, 0, int(dy * 120), 0)
+            else:
+                self.mouse.scroll(0, dy)
 
         elif evt_type == "key_down":
             key_name = event.get("key", "").lower()

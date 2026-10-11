@@ -10,13 +10,15 @@ if (Test-Path config.json) {
 "DEFAULT_RELAY = `"$relay`"" | Out-File -Encoding utf8 build_config.py
 Write-Host "Baking relay server into EXE: $relay"
 
-pyinstaller --noconfirm --onefile --windowed --name "DeskLite" --hidden-import build_config --uac-admin --distpath dist_build main.py
+$timestamp = Get-Date -Format "HHmmss"
+$outDir = "dist_$timestamp"
+pyinstaller --noconfirm --onefile --windowed --name "DeskLite" --hidden-import build_config --uac-admin --distpath $outDir main.py
 
 New-Item -ItemType Directory -Force server/web/download | Out-Null
-Copy-Item dist_build/DeskLite.exe server/web/download/DeskLite.exe -Force
-# Keep a backward-compatibility copy in download folder
-Copy-Item dist_build/DeskLite.exe server/web/download/RustDeskLight.exe -Force
+Copy-Item "$outDir/DeskLite.exe" server/web/download/DeskLite.exe -Force
+Copy-Item "$outDir/DeskLite.exe" server/web/download/RustDeskLight.exe -Force
 if (Test-Path server/web/download/RustDeskLight-Client.zip) {
     Remove-Item server/web/download/RustDeskLight-Client.zip -Force
 }
+Remove-Item -Recurse -Force $outDir -ErrorAction SilentlyContinue
 Write-Host "Done: server/web/download/DeskLite.exe"

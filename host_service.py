@@ -65,7 +65,7 @@ class HostService:
             try:
                 force = self.force_frame
                 self.force_frame = False
-                frame_bytes = self.capturer.capture_frame(draw_cursor=True, force=force)
+                frame_bytes = self.capturer.capture_frame(draw_cursor=False, force=force)
                 consecutive_errors = 0
             except Exception as e:
                 consecutive_errors += 1
