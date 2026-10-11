@@ -43,6 +43,12 @@ class HostService:
 
     def stop(self):
         self.running = False
+        if hasattr(self, "current_ws") and self.current_ws:
+            try:
+                if self.loop and self.loop.is_running():
+                    asyncio.run_coroutine_threadsafe(self.current_ws.close(), self.loop)
+            except Exception:
+                pass
         if self.loop and self.loop.is_running():
             self.loop.call_soon_threadsafe(self.loop.stop)
 
@@ -109,6 +115,7 @@ class HostService:
             ping_interval=20,
             ping_timeout=40
         ) as ws:
+            self.current_ws = ws
             # Register Host
             reg_payload = {
                 "action": "register",

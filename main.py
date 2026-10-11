@@ -288,9 +288,17 @@ class DeskLiteApp:
                     messagebox.showerror("Fehler", f"Konnte Dienst nicht installieren:\n{msg}")
 
     def on_close(self):
-        if self.host_service:
-            self.host_service.stop()
-        self.root.destroy()
+        try:
+            if self.host_service:
+                self.host_service.stop()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        import os
+        os._exit(0)
 
 def run_as_service():
     """Headless background runner when DeskLite is executed by Windows Service Manager."""
