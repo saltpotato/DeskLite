@@ -10,6 +10,7 @@ dist_build/
 *.spec
 
 # Large binaries (downloads hosted on server)
+*.exe
 server/web/download/*.exe
 server/web/download/*.zip
 
