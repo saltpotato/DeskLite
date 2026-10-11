@@ -1,6 +1,6 @@
 # ⚡ DeskLite - Remote Desktop
 
-Ein leichtgewichtiges, schlankes Remote-Desktop-System (DeskLite), das Firewalls und Router-NATs ohne Portfreigaben auf den Zielrechnern umgeht.
+Ein leichtgewichtiges, schlankes Remote-Desktop-System (DeskLite)
 
 ---
 
