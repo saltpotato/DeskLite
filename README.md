@@ -1,25 +1,25 @@
 # ⚡ DeskLite - Remote Desktop
 
-Ein leichtgewichtiges, schlankes Remote-Desktop-System (DeskLite)
+Ein schlankes, leichtgewichtiges Remote-Desktop-System in Python – mit Desktop-App und direktem HTML5-Web-Viewer im Browser.
 
 ---
 
-## 🛠️ Funktionsweise & Firewall-Bypass (Architektur)
+## 🛠️ Funktionsweise & Architektur
 
 ```
-[ Host PC (zuhause/Büro) ]                [ Viewer PC / Handy / Browser ]
-           │                                             │
-           │ (Ausgehende WebSocket-Verbindung)           │ (Ausgehende WebSocket-Verbindung)
-           ▼                                             ▼
-     ┌─────────────────────────────────────────────────────────┐
-     │           VPS Relay & Handshake Server (Docker)         │
-     │                 Port: 8765 (TCP / WebSocket)            │
-     └─────────────────────────────────────────────────────────┘
+[ Host PC ]                               [ Viewer PC / Browser ]
+     │                                               │
+     │ (WebSocket-Verbindung)                        │ (WebSocket-Verbindung)
+     ▼                                               ▼
+┌─────────────────────────────────────────────────────────┐
+│             DeskLite Relay Server (Docker)              │
+│                 Port: 8765 (TCP / WebSocket)            │
+└─────────────────────────────────────────────────────────┘
 ```
 
-- **Keine Portweiterleitung am Router nötig:** Sowohl der Host (der gesteuert wird) als auch der Viewer (der steuert) verbinden sich **ausgehend** (Outbound) zum Relay-Server auf deinem VPS. Ausgehende TCP-Verbindungen werden von praktisch jeder normalen Firewall, FritzBox und jedem Firmennetzwerk standardmäßig erlaubt.
-- **Relay / Vermittlung:** Sobald der Viewer die Kennung (Host-ID) eingibt, vermittelt der Server die Bild- und Eingabedaten in Echtzeit per WebSocket.
-- **Natives Desktop GUI & Web-Browser Client:** Du kannst entweder die Desktop-App auf beiden PCs starten ODER dich einfach über jeden Browser (z. B. auf Handy, Tablet, Laptop) auf `http://<dein-vps>:8765` einloggen!
+- **Einfache Verbindung per ID & Passwort:** Host und Viewer verbinden sich per WebSocket mit dem Relay-Server.
+- **Echtzeit-Übertragung:** Sobald die Host-ID eingegeben wird, überträgt der Server Bild- und Eingabedaten in Echtzeit.
+- **Desktop-App & Web-Viewer:** Die Steuerung ist sowohl über die schlanke Python-Desktop-App als auch direkt im Browser über `http://<dein-vps>:8765` möglich.
 
 ---
 
