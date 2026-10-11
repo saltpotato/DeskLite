@@ -109,19 +109,21 @@ class DeskLiteApp:
         btn_connect.pack(anchor=tk.W, ipady=4, fill=tk.X)
 
         # BOTTOM: Server & Status
+        # BOTTOM: Server, Service & Status
         bottom_frame = ttk.Frame(self.root, padding=(20, 10))
         bottom_frame.pack(fill=tk.X, side=tk.BOTTOM)
 
+        # Row 1: Server URL and Quality Mode
         server_row = ttk.Frame(bottom_frame)
         server_row.pack(fill=tk.X, pady=(0, 6))
 
         ttk.Label(server_row, text="Relay-Server:").pack(side=tk.LEFT)
-        self.entry_server = ttk.Entry(server_row, width=22)
+        self.entry_server = ttk.Entry(server_row, width=24)
         self.entry_server.insert(0, self.config.get("relay_server", "ws://localhost:8765"))
         self.entry_server.pack(side=tk.LEFT, padx=6)
 
         btn_save_server = ttk.Button(server_row, text="Speichern", command=self.save_server)
-        btn_save_server.pack(side=tk.LEFT, padx=(0, 8))
+        btn_save_server.pack(side=tk.LEFT, padx=(0, 12))
 
         ttk.Label(server_row, text="Profil:").pack(side=tk.LEFT)
         self.combo_mode = ttk.Combobox(server_row, values=["🚀 Schnell", "⚖️ Normal", "💎 HQ"], state="readonly", width=10)
@@ -135,24 +137,28 @@ class DeskLiteApp:
         self.combo_mode.pack(side=tk.LEFT, padx=6)
         self.combo_mode.bind("<<ComboboxSelected>>", self.on_mode_change)
 
+        # Row 2: Service & UAC Management
+        service_row = ttk.Frame(bottom_frame)
+        service_row.pack(fill=tk.X, pady=(4, 6))
+
         if not common.is_admin():
-            btn_admin = ttk.Button(server_row, text="🛡️ Als Admin ausführen", command=common.restart_as_admin)
-            btn_admin.pack(side=tk.RIGHT, padx=4)
+            btn_admin = ttk.Button(service_row, text="🛡️ Als Administrator ausführen", command=common.restart_as_admin)
+            btn_admin.pack(side=tk.LEFT)
         else:
             if common.is_service_installed():
-                self.btn_service = ttk.Button(server_row, text="🗑️ Dienst entfernen", command=self.toggle_windows_service)
-                self.btn_service.pack(side=tk.RIGHT, padx=4)
+                self.btn_service = ttk.Button(service_row, text="🗑️ Hintergrunddienst entfernen", command=self.toggle_windows_service)
+                self.btn_service.pack(side=tk.LEFT)
             else:
-                self.btn_service = ttk.Button(server_row, text="⚙️ Als Dienst einrichten", command=self.toggle_windows_service)
-                self.btn_service.pack(side=tk.RIGHT, padx=4)
+                self.btn_service = ttk.Button(service_row, text="⚙️ Als Windows-Dienst einrichten (SYSTEM)", command=self.toggle_windows_service)
+                self.btn_service.pack(side=tk.LEFT)
 
             if common.get_uac_secure_desktop():
-                self.btn_uac = ttk.Button(server_row, text="🛡️ UAC-Freigabe", command=self.enable_uac_remote)
-                self.btn_uac.pack(side=tk.RIGHT, padx=4)
+                self.btn_uac = ttk.Button(service_row, text="🛡️ UAC-Freigabe (Desktop abblenden aus)", command=self.enable_uac_remote)
+                self.btn_uac.pack(side=tk.LEFT, padx=8)
 
         # Status text
         self.lbl_status = ttk.Label(bottom_frame, text="🟡 Initialisiere...", style="Status.TLabel")
-        self.lbl_status.pack(anchor=tk.W)
+        self.lbl_status.pack(anchor=tk.W, pady=(4, 0))
 
     def start_host_service(self):
         if self.host_service:
