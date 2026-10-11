@@ -4,7 +4,21 @@ Ein schlankes, leichtgewichtiges Remote-Desktop-System in Python – mit Desktop
 
 ---
 
-## 🛠️ Funktionsweise & Architektur
+## ✨ Features
+
+- **Desktop-App & HTML5-Web-Viewer:** Entweder über die schlanke Python/Windows-App nutzen oder direkt ohne Installation im Browser (`http://<dein-vps>:8765`) fernsteuern.
+- **Native 1:1 Darstellung & Qualitätsprofile:** Drei umschaltbare Profile (**🚀 Schnell**, **⚖️ Normal**, **💎 HQ**) mit gestochen scharfer 1:1-Auflösung und OpenCV-gestützter Differenzbild-Erkennung für niedrige Bandbreite.
+- **Immersiver Vollbildmodus:** Echtes Vollbild im Browser und Desktop-Viewer mit automatisch ausblendender Floating-Toolbar am oberen Bildschirmrand.
+- **Zwischenablage-Synchronisation (Clipboard):** Kopierter Text wird zwischen Host und Viewer/Browser übertragen (`Strg+C` / `Strg+V` bzw. **📋 Einfügen**-Button).
+- **Quick-Shortcuts in der Toolbar:** Schnellzugriff auf **🖥️ Desktop (Win+D)**, **🪟 Startmenü**, **📁 Explorer** und **⚡ Task-Manager**.
+- **Partner-Historie:** Zuletzt verbundene Partner-IDs werden lokal gespeichert und können mit einem Klick wiederverbunden werden.
+- **Admin- & UAC-Unterstützung (Windows):** Läuft ohne Konsolenfenster im Hintergrund und unterstützt die Steuerung von erhöhten Fenstern sowie UAC-Abfragen.
+- **Auto-Reconnect:** Automatische Wiederverbindung bei kurzen Netzwerkunterbrechungen.
+- **Standalone `.exe` Generator:** Über `build.ps1` lässt sich eine eigenständige `DeskLite.exe` bauen (keine Python-Installation auf dem Zielgerät nötig), die auch direkt über das Web-Interface heruntergeladen werden kann.
+
+---
+
+## 🛠️ Architektur
 
 ```
 [ Host PC ]                               [ Viewer PC / Browser ]
@@ -17,71 +31,54 @@ Ein schlankes, leichtgewichtiges Remote-Desktop-System in Python – mit Desktop
 └─────────────────────────────────────────────────────────┘
 ```
 
-- **Einfache Verbindung per ID & Passwort:** Host und Viewer verbinden sich per WebSocket mit dem Relay-Server.
-- **Echtzeit-Übertragung:** Sobald die Host-ID eingegeben wird, überträgt der Server Bild- und Eingabedaten in Echtzeit.
-- **Desktop-App & Web-Viewer:** Die Steuerung ist sowohl über die schlanke Python-Desktop-App als auch direkt im Browser über `http://<dein-vps>:8765` möglich.
-
 ---
 
-## 🚀 1. Handshake & Relay Server auf VPS starten (Docker)
+## 🚀 1. Relay-Server starten (Docker)
 
-Kopiere den Ordner `server/` auf deinen VPS oder klone ihn dort hin.
+Kopiere den Ordner `server/` auf deinen Server oder klone das Repository dort hin:
 
-### Mit Docker Compose (empfohlen):
 ```bash
 cd server
 docker compose up -d --build
 ```
 
-Der Server lauscht auf Port `8765`. 
-*(Optional: Du kannst auf deinem VPS auch Nginx/Caddy davor schalten mit SSL für `wss://deine-domain.de`).*
+Der Server stellt auf Port `8765` sowohl den WebSocket-Relay als auch das HTML5-Web-Interface bereit.  
+*(Optional kann ein Reverse-Proxy wie Nginx oder Caddy mit HTTPS/WSS vorgeschaltet werden).*
 
 ---
 
-## 💻 2. Client-App auf den PCs starten
+## 💻 2. Client starten oder `.exe` bauen
 
-### Voraussetzungen:
-- Python 3.10+
-- Abhängigkeiten installieren (einmalig):
-  ```bash
-  pip install -r requirements.txt
-  ```
+### Direkt mit Python starten
+1. **Voraussetzungen:** Python 3.10+
+2. **Abhängigkeiten installieren (einmalig):**
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. **Starten:**
+   - Unter Windows per Doppelklick auf `start_app.bat` (startet ohne Konsolenfenster) oder:
+   ```bash
+   pythonw main.py
+   ```
 
-### Starten:
-- Unter Windows einfach doppelklicken auf `start_app.bat` oder im Terminal:
-  ```bash
-  python main.py
-  ```
+### Eigenständige `DeskLite.exe` erstellen (optional)
+Mit dem mitgelieferten PowerShell-Skript wird eine portable Einzeldatei (`DeskLite.exe`) gebaut, in der die Server-Adresse bereits hinterlegt ist:
+```powershell
+.\build.ps1 -ServerUrl "ws://DEINE_SERVER_IP:8765"
+```
+Die erzeugte Datei liegt anschließend unter `server/web/download/DeskLite.exe` und kann auf das Web-Interface hochgeladen werden.
 
 ---
 
 ## 🎮 3. Bedienung
 
-1. **Relay-Server-Adresse eintragen:**
-   - Trage unten im Feld *Relay-Server* die Adresse deines VPS ein:  
-     `ws://DEINE_VPS_IP:8765` (oder `wss://deine-domain.de`, falls mit SSL).
-   - Klicke auf **Server ändern**. Der PC registriert sich sofort beim Relay.
-2. **PC freigeben (Host):**
-   - Auf der linken Seite siehst du deine **ID** (z. B. `384 192`) und das **Passwort**.
-   - Teile diese ID demjenigen mit, der dich fernsteuern soll.
-3. **Anderen PC fernsteuern (Viewer):**
-   - Auf der rechten Seite die **Partner-ID** und optional das Passwort eingeben.
-   - Auf **🚀 Verbinden** klicken.
-   - Ein neues Fenster öffnet sich mit dem Desktop des Partners in Echtzeit!
+1. **Relay-Server einstellen:**
+   - Unten im Feld *Relay-Server* die Adresse eintragen (`ws://DEINE_SERVER_IP:8765` oder `wss://deine-domain.de`) und auf **Speichern** klicken.
+2. **Diesen PC freigeben (Host):**
+   - Links werden deine **6-stellige ID** (z. B. `384 192`) und das **Einmalkennwort** angezeigt.
+   - Über **🔄 Neu** lassen sich jederzeit eine neue ID oder ein neues Passwort generieren.
+   - Über den UAC-Button unten lässt sich bei Bedarf die Windows-Bildschirmabdunkelung bei UAC-Dialogen umschalten, damit Abfragen im Stream sichtbar und klickbar bleiben.
+3. **Partner steuern (Viewer / Browser):**
+   - In der Desktop-App rechts oder im Browser unter `http://DEINE_SERVER_IP:8765` die **Partner-ID** und das Passwort eingeben und auf **Verbinden** klicken.
+   - Im Vollbildmodus (`⛶ Vollbild`) blendet sich die obere Leiste automatisch aus und klappt wieder herunter, sobald man mit der Maus an den oberen Bildschirmrand fährt.
 
-### Tastenkombinationen im Viewer-Fenster:
-- **Mausklicks & Scrollen:** 1:1 wie vor Ort.
-- **Tastatur:** Alle Tasten werden direkt an den entfernten PC weitergeleitet.
-- **⛶ Vollbild:** Klick auf den Toolbar-Button oder Taste `F11`.
-- **Ctrl+Alt+Entf:** Button in der oberen Menüleiste.
-
----
-
-## 🌐 4. Bonus: Browser-Zugriff ohne Installation
-
-Auf deinem VPS ist im Relay-Server direkt ein HTML5-Viewer integriert:
-- Öffne einfach im Browser:
-  ```
-  http://DEINE_VPS_IP:8765
-  ```
-- Gib die Host-ID ein und steuere den Ziel-PC direkt im Browserfenster!
