@@ -79,24 +79,6 @@ class ScreenCapturer:
         if HAS_CV2:
             try:
                 img_np = np.frombuffer(raw.raw, dtype=np.uint8).reshape((raw.height, raw.width, 4))
-                
-                # Draw native Windows cursor directly in OpenCV (sub-millisecond)
-                if draw_cursor:
-                    cur_pos = self.get_cursor_pos()
-                    if cur_pos and 0 <= cur_pos[0] < self.width and 0 <= cur_pos[1] < self.height:
-                        cx, cy = cur_pos
-                        # Standard Windows Arrow coordinates
-                        pts = np.array([
-                            [cx, cy],
-                            [cx, cy + 18],
-                            [cx + 5, cy + 14],
-                            [cx + 9, cy + 22],
-                            [cx + 12, cy + 21],
-                            [cx + 8, cy + 13],
-                            [cx + 13, cy + 13]
-                        ], dtype=np.int32)
-                        cv2.fillPoly(img_np, [pts], (255, 255, 255, 255))
-                        cv2.polylines(img_np, [pts], isClosed=True, color=(0, 0, 0, 255), thickness=1)
 
                 # Smart Diff Check: keep stream alive every 1.0s even when unchanged
                 if not force:
@@ -126,14 +108,6 @@ class ScreenCapturer:
         try:
             self.last_send_time = now
             img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
-
-            if draw_cursor:
-                cur_pos = self.get_cursor_pos()
-                if cur_pos and 0 <= cur_pos[0] < self.width and 0 <= cur_pos[1] < self.height:
-                    draw = ImageDraw.Draw(img)
-                    cx, cy = cur_pos
-                    points = [(cx, cy), (cx, cy + 18), (cx + 5, cy + 14), (cx + 12, cy + 12)]
-                    draw.polygon(points, fill="white", outline="black")
 
             if self.scale != 1.0 and 0.1 <= self.scale < 1.0:
                 new_w = max(100, int(self.width * self.scale))
