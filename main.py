@@ -139,6 +139,13 @@ class DeskLiteApp:
             btn_admin = ttk.Button(server_row, text="🛡️ Als Admin ausführen", command=common.restart_as_admin)
             btn_admin.pack(side=tk.RIGHT, padx=4)
         else:
+            if common.is_service_installed():
+                self.btn_service = ttk.Button(server_row, text="🗑️ Dienst entfernen", command=self.toggle_windows_service)
+                self.btn_service.pack(side=tk.RIGHT, padx=4)
+            else:
+                self.btn_service = ttk.Button(server_row, text="⚙️ Als Dienst einrichten", command=self.toggle_windows_service)
+                self.btn_service.pack(side=tk.RIGHT, padx=4)
+
             if common.get_uac_secure_desktop():
                 self.btn_uac = ttk.Button(server_row, text="🛡️ UAC-Freigabe", command=self.enable_uac_remote)
                 self.btn_uac.pack(side=tk.RIGHT, padx=4)
@@ -248,14 +255,58 @@ class DeskLiteApp:
         relay_url = self.config.get("relay_server", "ws://localhost:8765")
         viewer = RemoteDesktopViewer(self.root, relay_url, partner_id, partner_pw)
 
+    def toggle_windows_service(self):
+        if common.is_service_installed():
+            if messagebox.askyesno("Dienst entfernen", "Möchtest du den DeskLite-Hintergrunddienst wirklich deinstallieren?"):
+                ok, msg = common.uninstall_service()
+                if ok:
+                    messagebox.showinfo("Deinstalliert", msg)
+                    if hasattr(self, "btn_service"):
+                        self.btn_service.config(text="⚙️ Als Dienst einrichten")
+                else:
+                    messagebox.showerror("Fehler", f"Konnte Dienst nicht deinstallieren:\n{msg}")
+        else:
+            if messagebox.askyesno("Dienst einrichten", "Möchtest du DeskLite als Windows-Hintergrunddienst (SYSTEM) installieren?\n\nDadurch läuft DeskLite dauerhaft im Hintergrund und kann Elevated-Dialoge (UAC, Task-Manager) ohne Einschränkungen fernsteuern."):
+                ok, msg = common.install_service()
+                if ok:
+                    messagebox.showinfo("Installiert", msg)
+                    if hasattr(self, "btn_service"):
+                        self.btn_service.config(text="🗑️ Dienst entfernen")
+                else:
+                    messagebox.showerror("Fehler", f"Konnte Dienst nicht installieren:\n{msg}")
+
     def on_close(self):
         if self.host_service:
             self.host_service.stop()
         self.root.destroy()
 
+def run_as_service():
+    """Headless background runner when DeskLite is executed by Windows Service Manager."""
+    import time
+    cfg = common.load_config()
+    host_service = HostService(
+        relay_url=cfg.get("relay_server", "ws://localhost:8765"),
+        my_id=cfg.get("my_id"),
+        my_password=cfg.get("my_password"),
+        quality=cfg.get("quality", 75),
+        max_fps=cfg.get("max_fps", 30),
+        scale=cfg.get("scale", 1.0)
+    )
+    host_service.start()
+    try:
+        while True:
+            time.sleep(1)
+    except (KeyboardInterrupt, SystemExit):
+        host_service.stop()
+
 if __name__ == "__main__":
-    common.enable_dpi_awareness()
-    root = tk.Tk()
-    common.apply_tk_scaling(root)
-    app = DeskLiteApp(root)
-    root.mainloop()
+    import sys
+    if "--service" in sys.argv:
+        run_as_service()
+    else:
+        common.enable_dpi_awareness()
+        root = tk.Tk()
+        common.apply_tk_scaling(root)
+        app = DeskLiteApp(root)
+        root.mainloop()
+

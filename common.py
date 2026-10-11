@@ -166,15 +166,67 @@ def set_uac_secure_desktop(enabled):
         return False
 
 def ensure_desktop_access():
-    """Ensures thread has access to active Windows desktop station."""
+    """Ensures thread has access to the currently active Windows desktop (Default or Winlogon)."""
     if sys.platform == "win32":
         try:
             user32 = ctypes.windll.user32
             hdesk = user32.OpenInputDesktop(0, False, 0x01FF) # GENERIC_ALL
             if hdesk:
                 user32.SetThreadDesktop(hdesk)
+                user32.CloseDesktop(hdesk)
         except Exception:
             pass
+
+def is_service_installed(service_name="DeskLiteService"):
+    """Checks if the Windows Service is registered."""
+    if sys.platform != "win32":
+        return False
+    import subprocess
+    try:
+        res = subprocess.run(["sc.exe", "query", service_name], capture_output=True, text=True, creationflags=0x08000000)
+        return "1060" not in res.stderr and "1060" not in res.stdout and service_name in res.stdout
+    except Exception:
+        return False
+
+def install_service(service_name="DeskLiteService"):
+    """Installs DeskLite as a Windows background service under SYSTEM account."""
+    if sys.platform != "win32":
+        return False, "Nur unter Windows unterstützt"
+    import subprocess
+    exe = sys.executable if getattr(sys, "frozen", False) else os.path.abspath(sys.argv[0])
+    bin_path = f'"{exe}" --service'
+    try:
+        # Stop and delete existing if any
+        subprocess.run(["sc.exe", "stop", service_name], capture_output=True, creationflags=0x08000000)
+        subprocess.run(["sc.exe", "delete", service_name], capture_output=True, creationflags=0x08000000)
+        
+        # Create service with auto-start
+        res = subprocess.run(
+            ["sc.exe", "create", service_name, f"binPath={bin_path}", "start=auto", "DisplayName=DeskLite Remote Service"],
+            capture_output=True, text=True, creationflags=0x08000000
+        )
+        if res.returncode != 0:
+            return False, res.stderr or res.stdout
+        
+        # Start service
+        subprocess.run(["sc.exe", "start", service_name], capture_output=True, creationflags=0x08000000)
+        return True, "Dienst erfolgreich installiert und gestartet!"
+    except Exception as e:
+        return False, str(e)
+
+def uninstall_service(service_name="DeskLiteService"):
+    """Stops and deletes the DeskLite Windows background service."""
+    if sys.platform != "win32":
+        return False, "Nur unter Windows unterstützt"
+    import subprocess
+    try:
+        subprocess.run(["sc.exe", "stop", service_name], capture_output=True, creationflags=0x08000000)
+        res = subprocess.run(["sc.exe", "delete", service_name], capture_output=True, text=True, creationflags=0x08000000)
+        if res.returncode == 0:
+            return True, "Dienst erfolgreich deinstalliert!"
+        return False, res.stderr or res.stdout
+    except Exception as e:
+        return False, str(e)
 
 def generate_id():
     """Generates a random 6-digit ID like 384 192."""
