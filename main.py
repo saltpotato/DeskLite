@@ -152,10 +152,6 @@ class DeskLiteApp:
             self.btn_uac = ttk.Button(service_row, text="🛡️ UAC-Freigabe (Desktop abblenden aus)", command=self.enable_uac_remote)
             self.btn_uac.pack(side=tk.LEFT, padx=8)
 
-        if not common.is_admin():
-            btn_admin = ttk.Button(service_row, text="🛡️ Als Admin ausführen", command=common.restart_as_admin)
-            btn_admin.pack(side=tk.RIGHT)
-
         # Status text
         self.lbl_status = ttk.Label(bottom_frame, text="🟡 Initialisiere...", style="Status.TLabel")
         self.lbl_status.pack(anchor=tk.W, pady=(4, 0))
@@ -310,6 +306,10 @@ if __name__ == "__main__":
     if "--service" in sys.argv:
         run_as_service()
     else:
+        # Enforce Administrator privileges on start so all permissions & service actions work
+        if not common.is_admin():
+            common.restart_as_admin()
+
         common.enable_dpi_awareness()
         root = tk.Tk()
         common.apply_tk_scaling(root)
