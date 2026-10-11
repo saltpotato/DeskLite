@@ -148,8 +148,8 @@ class DeskLiteApp:
             self.btn_service = ttk.Button(service_row, text="⚙️ Als Windows-Dienst einrichten (SYSTEM)", command=self.toggle_windows_service)
             self.btn_service.pack(side=tk.LEFT)
 
-        if common.get_uac_secure_desktop():
-            self.btn_uac = ttk.Button(service_row, text="🛡️ UAC-Freigabe (Desktop abblenden aus)", command=self.enable_uac_remote)
+        if not common.get_uac_auto_elevate():
+            self.btn_uac = ttk.Button(service_row, text="🛡️ UAC-Fernsteuerung aktivieren", command=self.enable_uac_remote)
             self.btn_uac.pack(side=tk.LEFT, padx=8)
 
         # Status text
@@ -228,10 +228,10 @@ class DeskLiteApp:
             self.host_service.capturer.update_settings(quality=self.config["quality"], scale=self.config["scale"])
 
     def enable_uac_remote(self):
-        if common.set_uac_secure_desktop(False):
-            messagebox.showinfo("UAC-Fernsteuerung aktiv", "Erfolgreich! UAC-Dialoge (Ja/Nein) erscheinen ab sofort auf dem Desktop und können aus der Ferne gesteuert werden.")
+        if common.set_uac_auto_elevate(True):
+            messagebox.showinfo("UAC-Fernsteuerung aktiv", "Erfolgreich! Administrative Aktionen werden ab sofort ohne blockierende Dialogbox direkt ausgeführt. Remote-Steuerung funktioniert uneingeschränkt!")
             if hasattr(self, "btn_uac"):
-                self.btn_uac.config(text="✅ UAC aktiv", state="disabled")
+                self.btn_uac.config(text="✅ UAC-Bypass aktiv", state="disabled")
         else:
             messagebox.showerror("Fehler", "Konnte UAC-Einstellung nicht ändern (Administrator-Rechte erforderlich).")
 

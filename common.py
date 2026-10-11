@@ -152,14 +152,31 @@ def get_uac_secure_desktop():
     except Exception:
         return True
 
-def set_uac_secure_desktop(enabled):
-    """Enables or disables Secure Desktop for UAC prompts (requires Admin)."""
+def get_uac_auto_elevate():
+    """Returns True if admin actions elevate automatically without blocking dialogs."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", 0, winreg.KEY_READ)
+        val, _ = winreg.QueryValueEx(key, "ConsentPromptBehaviorAdmin")
+        winreg.CloseKey(key)
+        return val == 0
+    except Exception:
+        return False
+
+def set_uac_auto_elevate(enabled):
+    """If enabled, admin actions auto-elevate without blocking prompts (ConsentPromptBehaviorAdmin=0)."""
     if sys.platform != "win32":
         return False
     try:
         import winreg
         key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", 0, winreg.KEY_SET_VALUE)
-        winreg.SetValueEx(key, "PromptOnSecureDesktop", 0, winreg.REG_DWORD, 1 if enabled else 0)
+        # 0 = Elevate without prompting (best for remote administration)
+        # 5 = Prompt for consent for non-Windows binaries (Windows default)
+        winreg.SetValueEx(key, "ConsentPromptBehaviorAdmin", 0, winreg.REG_DWORD, 0 if enabled else 5)
+        # Also ensure Secure Desktop is off
+        winreg.SetValueEx(key, "PromptOnSecureDesktop", 0, winreg.REG_DWORD, 0 if enabled else 1)
         winreg.CloseKey(key)
         return True
     except Exception:
@@ -192,9 +209,12 @@ def install_service(service_name="DeskLiteService"):
     """Installs DeskLite as a Windows background service under SYSTEM account."""
     if sys.platform != "win32":
         return False, "Nur unter Windows unterstützt"
-    import subprocess
-    exe = sys.executable if getattr(sys, "frozen", False) else os.path.abspath(sys.argv[0])
-    bin_path = f'"{exe}" --service'
+    if getattr(sys, "frozen", False):
+        bin_path = f'"{sys.executable}" --service'
+    else:
+        python_exe = sys.executable
+        script_path = os.path.abspath(sys.argv[0])
+        bin_path = f'"{python_exe}" "{script_path}" --service'
     try:
         # Stop and delete existing if any
         subprocess.run(["sc.exe", "stop", service_name], capture_output=True, creationflags=0x08000000)
