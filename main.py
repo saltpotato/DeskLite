@@ -141,20 +141,20 @@ class DeskLiteApp:
         service_row = ttk.Frame(bottom_frame)
         service_row.pack(fill=tk.X, pady=(4, 6))
 
-        if not common.is_admin():
-            btn_admin = ttk.Button(service_row, text="🛡️ Als Administrator ausführen", command=common.restart_as_admin)
-            btn_admin.pack(side=tk.LEFT)
+        if common.is_service_installed():
+            self.btn_service = ttk.Button(service_row, text="🗑️ Hintergrunddienst entfernen", command=self.toggle_windows_service)
+            self.btn_service.pack(side=tk.LEFT)
         else:
-            if common.is_service_installed():
-                self.btn_service = ttk.Button(service_row, text="🗑️ Hintergrunddienst entfernen", command=self.toggle_windows_service)
-                self.btn_service.pack(side=tk.LEFT)
-            else:
-                self.btn_service = ttk.Button(service_row, text="⚙️ Als Windows-Dienst einrichten (SYSTEM)", command=self.toggle_windows_service)
-                self.btn_service.pack(side=tk.LEFT)
+            self.btn_service = ttk.Button(service_row, text="⚙️ Als Windows-Dienst einrichten (SYSTEM)", command=self.toggle_windows_service)
+            self.btn_service.pack(side=tk.LEFT)
 
-            if common.get_uac_secure_desktop():
-                self.btn_uac = ttk.Button(service_row, text="🛡️ UAC-Freigabe (Desktop abblenden aus)", command=self.enable_uac_remote)
-                self.btn_uac.pack(side=tk.LEFT, padx=8)
+        if common.get_uac_secure_desktop():
+            self.btn_uac = ttk.Button(service_row, text="🛡️ UAC-Freigabe (Desktop abblenden aus)", command=self.enable_uac_remote)
+            self.btn_uac.pack(side=tk.LEFT, padx=8)
+
+        if not common.is_admin():
+            btn_admin = ttk.Button(service_row, text="🛡️ Als Admin ausführen", command=common.restart_as_admin)
+            btn_admin.pack(side=tk.RIGHT)
 
         # Status text
         self.lbl_status = ttk.Label(bottom_frame, text="🟡 Initialisiere...", style="Status.TLabel")
