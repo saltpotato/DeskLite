@@ -76,10 +76,28 @@ class ScreenCapturer:
 
         now = time.time()
 
-        if HAS_CV2 and not draw_cursor:
+        if HAS_CV2:
             try:
                 img_np = np.frombuffer(raw.raw, dtype=np.uint8).reshape((raw.height, raw.width, 4))
                 
+                # Draw native Windows cursor directly in OpenCV (sub-millisecond)
+                if draw_cursor:
+                    cur_pos = self.get_cursor_pos()
+                    if cur_pos and 0 <= cur_pos[0] < self.width and 0 <= cur_pos[1] < self.height:
+                        cx, cy = cur_pos
+                        # Standard Windows Arrow coordinates
+                        pts = np.array([
+                            [cx, cy],
+                            [cx, cy + 18],
+                            [cx + 5, cy + 14],
+                            [cx + 9, cy + 22],
+                            [cx + 12, cy + 21],
+                            [cx + 8, cy + 13],
+                            [cx + 13, cy + 13]
+                        ], dtype=np.int32)
+                        cv2.fillPoly(img_np, [pts], (255, 255, 255, 255))
+                        cv2.polylines(img_np, [pts], isClosed=True, color=(0, 0, 0, 255), thickness=1)
+
                 # Smart Diff Check: keep stream alive every 1.0s even when unchanged
                 if not force:
                     thumb = cv2.resize(img_np, (48, 27), interpolation=cv2.INTER_NEAREST)
