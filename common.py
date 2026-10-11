@@ -46,6 +46,17 @@ def remember_partner(cfg, partner_id, password):
     cfg["recent_partners"] = recent[:8]
     save_config(cfg)
 
+def _get_gui_executable():
+    """Returns pythonw.exe (windowless) when running from source on Windows, or sys.executable."""
+    if getattr(sys, "frozen", False):
+        return sys.executable
+    if sys.platform == "win32":
+        py_dir = os.path.dirname(sys.executable)
+        pythonw = os.path.join(py_dir, "pythonw.exe")
+        if os.path.exists(pythonw):
+            return pythonw
+    return sys.executable
+
 def is_admin():
     """Checks whether the current process has administrator privileges."""
     if sys.platform != "win32":
@@ -55,22 +66,238 @@ def is_admin():
     except Exception:
         return False
 
+def is_system():
+    """Checks whether the current process is running as NT AUTHORITY\\SYSTEM."""
+    if sys.platform != "win32":
+        return False
+    try:
+        buf = ctypes.create_unicode_buffer(256)
+        size = ctypes.c_ulong(256)
+        if ctypes.windll.advapi32.GetUserNameW(buf, ctypes.byref(size)):
+            if buf.value.upper() in ("SYSTEM", "LOCAL SYSTEM"):
+                return True
+        # Language-independent check for LocalSystem SID (S-1-5-18, WinLocalSystemSid = 22)
+        sid = (ctypes.c_byte * 68)()
+        sid_size = ctypes.c_ulong(68)
+        if ctypes.windll.advapi32.CreateWellKnownSid(22, None, ctypes.byref(sid), ctypes.byref(sid_size)):
+            is_member = ctypes.c_int(0)
+            if ctypes.windll.advapi32.CheckTokenMembership(None, ctypes.byref(sid), ctypes.byref(is_member)):
+                return is_member.value != 0
+    except Exception:
+        pass
+    return False
+
 def restart_as_admin():
-    """Relaunches the current process with elevated administrator rights via UAC."""
+    """Relaunches the current process with elevated administrator rights via UAC without a console window."""
     if sys.platform == "win32":
         try:
+            exe = _get_gui_executable()
             if getattr(sys, "frozen", False):
-                exe = sys.executable
                 params = ""
             else:
-                exe = sys.executable
                 params = f'"{os.path.abspath(sys.argv[0])}"'
-            ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", exe, params, None, 1
+            res = ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", exe, params, APP_DIR, 1
             )
-            sys.exit(0)
+            if res > 32:
+                sys.exit(0)
         except Exception:
             return False
+    return False
+
+def elevate_to_system():
+    """Relaunches the current process as interactive NT AUTHORITY\\SYSTEM in the active user session
+    by duplicating winlogon.exe's primary token. Required to click UAC prompts (consent.exe)."""
+    if sys.platform != "win32" or not is_admin() or is_system():
+        return False
+    try:
+        from ctypes import wintypes
+        kernel32 = ctypes.windll.kernel32
+        advapi32 = ctypes.windll.advapi32
+
+        # 64-bit safe prototypes
+        class LUID(ctypes.Structure):
+            _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+        class LUID_AND_ATTRIBUTES(ctypes.Structure):
+            _fields_ = [("Luid", LUID), ("Attributes", wintypes.DWORD)]
+
+        class TOKEN_PRIVILEGES(ctypes.Structure):
+            _fields_ = [("PrivilegeCount", wintypes.DWORD), ("Privileges", LUID_AND_ATTRIBUTES * 1)]
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+
+        advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        advapi32.OpenProcessToken.restype = wintypes.BOOL
+        advapi32.LookupPrivilegeValueW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.POINTER(LUID)]
+        advapi32.LookupPrivilegeValueW.restype = wintypes.BOOL
+        advapi32.AdjustTokenPrivileges.argtypes = [wintypes.HANDLE, wintypes.BOOL, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p]
+        advapi32.AdjustTokenPrivileges.restype = wintypes.BOOL
+        advapi32.DuplicateTokenEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.POINTER(wintypes.HANDLE)]
+        advapi32.DuplicateTokenEx.restype = wintypes.BOOL
+        advapi32.CreateProcessWithTokenW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPWSTR,
+            wintypes.DWORD, ctypes.c_void_p, wintypes.LPCWSTR, ctypes.c_void_p, ctypes.c_void_p
+        ]
+        advapi32.CreateProcessWithTokenW.restype = wintypes.BOOL
+
+        # 1. Enable SeDebugPrivilege & SeImpersonatePrivilege on current process token
+        h_cur_tok = wintypes.HANDLE()
+        if advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0020 | 0x0008, ctypes.byref(h_cur_tok)):
+            for priv_name in ("SeDebugPrivilege", "SeImpersonatePrivilege"):
+                luid = LUID()
+                if advapi32.LookupPrivilegeValueW(None, priv_name, ctypes.byref(luid)):
+                    tp = TOKEN_PRIVILEGES()
+                    tp.PrivilegeCount = 1
+                    tp.Privileges[0].Luid = luid
+                    tp.Privileges[0].Attributes = 0x00000002  # SE_PRIVILEGE_ENABLED
+                    advapi32.AdjustTokenPrivileges(h_cur_tok, False, ctypes.byref(tp), 0, None, None)
+            kernel32.CloseHandle(h_cur_tok)
+
+        # 2. Find winlogon.exe in our current interactive session
+        my_session = wintypes.DWORD(0)
+        kernel32.ProcessIdToSessionId(kernel32.GetCurrentProcessId(), ctypes.byref(my_session))
+
+        h_snap = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+        if not h_snap or h_snap == wintypes.HANDLE(-1).value:
+            return False
+
+        pe = PROCESSENTRY32W()
+        pe.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        winlogon_pid = 0
+        fallback_pid = 0
+        if kernel32.Process32FirstW(h_snap, ctypes.byref(pe)):
+            while True:
+                if pe.szExeFile.lower() == "winlogon.exe":
+                    fallback_pid = pe.th32ProcessID
+                    proc_sess = wintypes.DWORD(0)
+                    if kernel32.ProcessIdToSessionId(pe.th32ProcessID, ctypes.byref(proc_sess)):
+                        if proc_sess.value == my_session.value:
+                            winlogon_pid = pe.th32ProcessID
+                            break
+                if not kernel32.Process32NextW(h_snap, ctypes.byref(pe)):
+                    break
+        kernel32.CloseHandle(h_snap)
+
+        winlogon_pid = winlogon_pid or fallback_pid
+        if not winlogon_pid:
+            return False
+
+        # 3. Open winlogon.exe and duplicate its SYSTEM token
+        h_proc = kernel32.OpenProcess(0x0400, False, winlogon_pid)  # PROCESS_QUERY_INFORMATION
+        if not h_proc:
+            h_proc = kernel32.OpenProcess(0x1000, False, winlogon_pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h_proc:
+            return False
+
+        h_tok = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(h_proc, 0x02000000, ctypes.byref(h_tok)):  # MAXIMUM_ALLOWED
+            kernel32.CloseHandle(h_proc)
+            return False
+
+        h_dup = wintypes.HANDLE()
+        # SecurityImpersonation = 2, TokenPrimary = 1, MAXIMUM_ALLOWED = 0x02000000
+        if not advapi32.DuplicateTokenEx(h_tok, 0x02000000, None, 2, 1, ctypes.byref(h_dup)):
+            kernel32.CloseHandle(h_tok)
+            kernel32.CloseHandle(h_proc)
+            return False
+
+        # 4. Launch DeskLite with the SYSTEM token on the interactive desktop (windowless via pythonw.exe)
+        class STARTUPINFOW(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("lpReserved", wintypes.LPWSTR),
+                ("lpDesktop", wintypes.LPWSTR),
+                ("lpTitle", wintypes.LPWSTR),
+                ("dwX", wintypes.DWORD),
+                ("dwY", wintypes.DWORD),
+                ("dwXSize", wintypes.DWORD),
+                ("dwYSize", wintypes.DWORD),
+                ("dwXCountChars", wintypes.DWORD),
+                ("dwYCountChars", wintypes.DWORD),
+                ("dwFillAttribute", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD),
+                ("wShowWindow", wintypes.WORD),
+                ("cbReserved2", wintypes.WORD),
+                ("lpReserved2", ctypes.c_void_p),
+                ("hStdInput", wintypes.HANDLE),
+                ("hStdOutput", wintypes.HANDLE),
+                ("hStdError", wintypes.HANDLE),
+            ]
+
+        class PROCESS_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("hProcess", wintypes.HANDLE),
+                ("hThread", wintypes.HANDLE),
+                ("dwProcessId", wintypes.DWORD),
+                ("dwThreadId", wintypes.DWORD),
+            ]
+
+        exe = _get_gui_executable()
+        if getattr(sys, "frozen", False):
+            cmd_str = f'"{exe}" --system'
+        else:
+            script = os.path.abspath(sys.argv[0])
+            cmd_str = f'"{exe}" "{script}" --system'
+
+        cmd_buf = ctypes.create_unicode_buffer(cmd_str)
+        si = STARTUPINFOW()
+        si.cb = ctypes.sizeof(STARTUPINFOW)
+        si.lpDesktop = "winsta0\\default"
+        pi = PROCESS_INFORMATION()
+
+        ok = advapi32.CreateProcessWithTokenW(
+            h_dup,
+            0,
+            None,
+            cmd_buf,
+            0,
+            None,
+            APP_DIR,
+            ctypes.byref(si),
+            ctypes.byref(pi),
+        )
+
+        if ok:
+            kernel32.CloseHandle(pi.hThread)
+            kernel32.CloseHandle(pi.hProcess)
+            kernel32.CloseHandle(h_dup)
+            kernel32.CloseHandle(h_tok)
+            kernel32.CloseHandle(h_proc)
+            sys.exit(0)
+
+        kernel32.CloseHandle(h_dup)
+        kernel32.CloseHandle(h_tok)
+        kernel32.CloseHandle(h_proc)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
     return False
 
 def get_clipboard_text():
@@ -140,7 +367,7 @@ def set_clipboard_text(text):
         return False
 
 def get_uac_secure_desktop():
-    """Returns True if Secure Desktop is enabled for UAC prompts."""
+    """Returns True if Secure Desktop (screen dimming) is enabled for UAC prompts."""
     if sys.platform != "win32":
         return False
     try:
@@ -152,58 +379,84 @@ def get_uac_secure_desktop():
     except Exception:
         return True
 
-def get_uac_auto_elevate():
-    """Returns True if admin actions elevate automatically without blocking dialogs."""
-    if sys.platform != "win32":
-        return False
-    try:
-        import winreg
-        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", 0, winreg.KEY_READ)
-        val, _ = winreg.QueryValueEx(key, "ConsentPromptBehaviorAdmin")
-        winreg.CloseKey(key)
-        return val == 0
-    except Exception:
-        return False
-
-def set_uac_auto_elevate(enabled):
-    """If enabled, admin actions auto-elevate without blocking prompts (ConsentPromptBehaviorAdmin=0)."""
+def set_uac_secure_desktop(enabled):
+    """Sets PromptOnSecureDesktop (1 = Secure Desktop dimming on, 0 = normal desktop so UAC is streamable)
+    while always keeping normal UAC consent prompts active (ConsentPromptBehaviorAdmin = 5)."""
     if sys.platform != "win32":
         return False
     try:
         import winreg
         key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", 0, winreg.KEY_SET_VALUE)
-        # 0 = Elevate without prompting (best for remote administration)
-        # 5 = Prompt for consent for non-Windows binaries (Windows default)
-        winreg.SetValueEx(key, "ConsentPromptBehaviorAdmin", 0, winreg.REG_DWORD, 0 if enabled else 5)
-        # Also ensure Secure Desktop is off
-        winreg.SetValueEx(key, "PromptOnSecureDesktop", 0, winreg.REG_DWORD, 0 if enabled else 1)
+        # Always keep normal UAC prompt (5 = Prompt for consent for non-Windows binaries, never auto-elevate!)
+        winreg.SetValueEx(key, "ConsentPromptBehaviorAdmin", 0, winreg.REG_DWORD, 5)
+        winreg.SetValueEx(key, "PromptOnSecureDesktop", 0, winreg.REG_DWORD, 1 if enabled else 0)
         winreg.CloseKey(key)
         return True
     except Exception:
         return False
 
-def ensure_desktop_access():
-    """Ensures thread has access to the currently active Windows desktop (Default or Winlogon)."""
+def _get_desktop_name(hdesk):
+    if not hdesk:
+        return ""
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    user32.GetUserObjectInformationW.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetUserObjectInformationW.restype = wintypes.BOOL
+    buf = ctypes.create_unicode_buffer(256)
+    needed = wintypes.DWORD(0)
+    # UOI_NAME = 2
+    if user32.GetUserObjectInformationW(hdesk, 2, buf, ctypes.sizeof(buf), ctypes.byref(needed)):
+        return buf.value
+    return ""
+
+def ensure_desktop_access(before_switch_callback=None):
+    """Ensures thread is attached to the currently active Windows input desktop (Default or Winlogon).
+    Returns True if the thread desktop was switched."""
     if sys.platform == "win32":
         try:
+            from ctypes import wintypes
             user32 = ctypes.windll.user32
-            hdesk = user32.OpenInputDesktop(0, False, 0x01FF) # GENERIC_ALL
+            kernel32 = ctypes.windll.kernel32
+            user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            user32.OpenInputDesktop.restype = wintypes.HANDLE
+            user32.GetThreadDesktop.argtypes = [wintypes.DWORD]
+            user32.GetThreadDesktop.restype = wintypes.HANDLE
+            user32.SetThreadDesktop.argtypes = [wintypes.HANDLE]
+            user32.SetThreadDesktop.restype = wintypes.BOOL
+            user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+            user32.CloseDesktop.restype = wintypes.BOOL
+
+            hdesk = user32.OpenInputDesktop(0, False, 0x01FF)  # GENERIC_ALL
             if hdesk:
-                user32.SetThreadDesktop(hdesk)
+                cur_hdesk = user32.GetThreadDesktop(kernel32.GetCurrentThreadId())
+                in_name = _get_desktop_name(hdesk)
+                cur_name = _get_desktop_name(cur_hdesk)
+                if in_name and in_name.lower() != cur_name.lower():
+                    if before_switch_callback:
+                        try:
+                            before_switch_callback()
+                        except Exception:
+                            pass
+                    switched = bool(user32.SetThreadDesktop(hdesk))
+                    user32.CloseDesktop(hdesk)
+                    return switched
                 user32.CloseDesktop(hdesk)
         except Exception:
             pass
+    return False
 
-def is_service_installed(service_name="DeskLiteService"):
-    """Checks if the Windows Service is registered."""
+def cleanup_broken_service(service_name="DeskLiteService"):
+    """Removes any leftover non-functional sc.exe DeskLiteService entry."""
     if sys.platform != "win32":
-        return False
+        return
     import subprocess
     try:
         res = subprocess.run(["sc.exe", "query", service_name], capture_output=True, text=True, creationflags=0x08000000)
-        return "1060" not in res.stderr and "1060" not in res.stdout and service_name in res.stdout
+        if service_name in res.stdout and "STOPPED" in res.stdout:
+            subprocess.run(["sc.exe", "delete", service_name], capture_output=True, creationflags=0x08000000)
     except Exception:
-        return False
+        pass
+
 
 def install_service(service_name="DeskLiteService"):
     """Installs DeskLite as a Windows background service under SYSTEM account."""

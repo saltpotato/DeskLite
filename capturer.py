@@ -61,15 +61,19 @@ class ScreenCapturer:
         return None
 
     def capture_frame(self, draw_cursor=False, force=False):
-        """Captures a frame and returns JPEG bytes. Resilient to screen standby and locks."""
+        """Captures a frame and returns JPEG bytes. Resilient to screen standby, UAC desktop switches, and locks."""
         try:
-            ensure_desktop_access()
+            if ensure_desktop_access(before_switch_callback=lambda: self.sct.close()):
+                self.sct = mss.MSS()
+                self._update_monitor()
+                self.last_thumb = None
             raw = self.sct.grab(self.monitor)
         except Exception:
             try:
-                self.sct = mss.MSS()
                 ensure_desktop_access()
+                self.sct = mss.MSS()
                 self._update_monitor()
+                self.last_thumb = None
                 raw = self.sct.grab(self.monitor)
             except Exception:
                 return None

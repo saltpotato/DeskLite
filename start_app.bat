@@ -1,15 +1,23 @@
 @echo off
-title DeskLite
 cd /d "%~dp0"
 
-python main.py
-if errorlevel 1 (
-    if exist "%~dp0DeskLite.exe" (
-        start "" "%~dp0DeskLite.exe"
-    ) else (
-        echo.
-        echo Fehler beim Starten von DeskLite.
-        pause
-    )
+where pythonw >nul 2>&1
+if %errorlevel% equ 0 (
+    start "" pythonw "%~dp0main.py"
+    exit /b 0
 )
 
+where python >nul 2>&1
+if %errorlevel% equ 0 (
+    start "" python "%~dp0main.py"
+    exit /b 0
+)
+
+if exist "%~dp0DeskLite.exe" (
+    start "" "%~dp0DeskLite.exe"
+    exit /b 0
+)
+
+echo.
+echo Fehler beim Starten von DeskLite.
+pause

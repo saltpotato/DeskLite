@@ -7,8 +7,10 @@ from viewer_window import RemoteDesktopViewer
 class DeskLiteApp:
     def __init__(self, root):
         self.root = root
+        is_sys = common.is_system()
         is_adm = common.is_admin()
-        self.root.title(f"DeskLite {'[Administrator]' if is_adm else ''} - Remote Desktop")
+        role_tag = "[SYSTEM]" if is_sys else ("[Administrator]" if is_adm else "")
+        self.root.title(f"DeskLite {role_tag} - Remote Desktop".replace("  ", " "))
         self.root.resizable(False, False)
         
         self.config = common.load_config()
@@ -49,7 +51,9 @@ class DeskLiteApp:
     def _build_ui(self):
         # Header banner
         header_text = "⚡ DeskLite"
-        if common.is_admin():
+        if common.is_system():
+            header_text += " [SYSTEM]"
+        elif common.is_admin():
             header_text += " [Administrator]"
         header = ttk.Label(self.root, text=header_text, style="Header.TLabel")
         header.pack(pady=(16, 12))
@@ -137,20 +141,21 @@ class DeskLiteApp:
         self.combo_mode.pack(side=tk.LEFT, padx=6)
         self.combo_mode.bind("<<ComboboxSelected>>", self.on_mode_change)
 
-        # Row 2: Service & UAC Management
+        # Row 2: SYSTEM & UAC Remote Control Settings
         service_row = ttk.Frame(bottom_frame)
         service_row.pack(fill=tk.X, pady=(4, 6))
 
-        if common.is_service_installed():
-            self.btn_service = ttk.Button(service_row, text="🗑️ Hintergrunddienst entfernen", command=self.toggle_windows_service)
-            self.btn_service.pack(side=tk.LEFT)
+        if common.is_system():
+            lbl_sys = ttk.Label(service_row, text="🛡️ SYSTEM-Modus aktiv (UAC steuerbar)", foreground="#2e7d32", font=("Segoe UI", 9, "bold"))
+            lbl_sys.pack(side=tk.LEFT, padx=(0, 8))
         else:
-            self.btn_service = ttk.Button(service_row, text="⚙️ Als Windows-Dienst einrichten (SYSTEM)", command=self.toggle_windows_service)
-            self.btn_service.pack(side=tk.LEFT)
+            self.btn_service = ttk.Button(service_row, text="⚡ Als SYSTEM neu starten (für UAC)", command=self.switch_to_system)
+            self.btn_service.pack(side=tk.LEFT, padx=(0, 8))
 
-        uac_text = "↩️ UAC auf Standard zurücksetzen" if common.get_uac_auto_elevate() else "🛡️ UAC-Bypass einschalten"
+        sec_desk_on = common.get_uac_secure_desktop()
+        uac_text = "🔓 UAC im Stream sichtbar machen" if sec_desk_on else "↩️ UAC-Abdunkelung (Standard) aktivieren"
         self.btn_uac = ttk.Button(service_row, text=uac_text, command=self.toggle_uac_setting)
-        self.btn_uac.pack(side=tk.LEFT, padx=8)
+        self.btn_uac.pack(side=tk.LEFT)
 
         # Status text
         self.lbl_status = ttk.Label(bottom_frame, text="🟡 Initialisiere...", style="Status.TLabel")
@@ -227,21 +232,35 @@ class DeskLiteApp:
         if self.host_service:
             self.host_service.capturer.update_settings(quality=self.config["quality"], scale=self.config["scale"])
 
+    def switch_to_system(self):
+        if not common.elevate_to_system():
+            messagebox.showerror("Fehler", "Konnte nicht in den SYSTEM-Modus wechseln (Admin-Rechte erforderlich).")
+
     def toggle_uac_setting(self):
-        currently_auto = common.get_uac_auto_elevate()
-        if currently_auto:
-            # Turn it back to Windows standard (show dialogs)
-            if common.set_uac_auto_elevate(False):
-                messagebox.showinfo("UAC zurückgesetzt", "UAC-Bestätigungen sind wieder aktiv (Standard-Windows-Verhalten: Dialoge werden normal angezeigt).")
+        sec_desk_on = common.get_uac_secure_desktop()
+        if sec_desk_on:
+            # Turn off Secure Desktop dimming while keeping normal UAC prompt (ConsentPromptBehaviorAdmin=5)
+            if common.set_uac_secure_desktop(False):
+                self.config["uac_secure_desktop"] = False
+                common.save_config(self.config)
+                messagebox.showinfo(
+                    "UAC für Remote optimiert",
+                    "UAC-Abfragen (Ja/Nein) erscheinen weiterhin ganz normal, aber ohne den Bildschirm abzudunkeln.\n\nDadurch kannst du UAC-Fenster im Browser sehen und anklicken."
+                )
                 if hasattr(self, "btn_uac"):
-                    self.btn_uac.config(text="🛡️ UAC-Bypass einschalten")
+                    self.btn_uac.config(text="↩️ UAC-Abdunkelung (Standard) aktivieren")
             else:
                 messagebox.showerror("Fehler", "Konnte Einstellung nicht ändern (Admin-Rechte erforderlich).")
         else:
-            if common.set_uac_auto_elevate(True):
-                messagebox.showinfo("UAC-Bypass aktiv", "UAC-Bypass aktiviert: Admin-Aktionen werden direkt ausgeführt.")
+            if common.set_uac_secure_desktop(True):
+                self.config["uac_secure_desktop"] = True
+                common.save_config(self.config)
+                messagebox.showinfo(
+                    "UAC auf Windows-Standard",
+                    "Die Windows-Bildschirmabdunkelung (Secure Desktop) bei UAC-Abfragen ist wieder aktiviert."
+                )
                 if hasattr(self, "btn_uac"):
-                    self.btn_uac.config(text="↩️ UAC auf Standard zurücksetzen")
+                    self.btn_uac.config(text="🔓 UAC im Stream sichtbar machen")
             else:
                 messagebox.showerror("Fehler", "Konnte Einstellung nicht ändern (Admin-Rechte erforderlich).")
 
@@ -266,26 +285,6 @@ class DeskLiteApp:
 
         relay_url = self.config.get("relay_server", "ws://localhost:8765")
         viewer = RemoteDesktopViewer(self.root, relay_url, partner_id, partner_pw)
-
-    def toggle_windows_service(self):
-        if common.is_service_installed():
-            if messagebox.askyesno("Dienst entfernen", "Möchtest du den DeskLite-Hintergrunddienst wirklich deinstallieren?"):
-                ok, msg = common.uninstall_service()
-                if ok:
-                    messagebox.showinfo("Deinstalliert", msg)
-                    if hasattr(self, "btn_service"):
-                        self.btn_service.config(text="⚙️ Als Dienst einrichten")
-                else:
-                    messagebox.showerror("Fehler", f"Konnte Dienst nicht deinstallieren:\n{msg}")
-        else:
-            if messagebox.askyesno("Dienst einrichten", "Möchtest du DeskLite als Windows-Hintergrunddienst (SYSTEM) installieren?\n\nDadurch läuft DeskLite dauerhaft im Hintergrund und kann Elevated-Dialoge (UAC, Task-Manager) ohne Einschränkungen fernsteuern."):
-                ok, msg = common.install_service()
-                if ok:
-                    messagebox.showinfo("Installiert", msg)
-                    if hasattr(self, "btn_service"):
-                        self.btn_service.config(text="🗑️ Dienst entfernen")
-                else:
-                    messagebox.showerror("Fehler", f"Konnte Dienst nicht installieren:\n{msg}")
 
     def on_close(self):
         try:
@@ -324,13 +323,25 @@ if __name__ == "__main__":
     if "--service" in sys.argv:
         run_as_service()
     else:
-        # Enforce Administrator privileges on start so all permissions & service actions work
+        # 1. Enforce Administrator privileges on start (via pythonw.exe so no console stays open)
         if not common.is_admin():
             common.restart_as_admin()
+
+        # 2. Automatically elevate from Admin to interactive SYSTEM in the current session
+        #    so DeskLite has the same integrity level (0x4000) as consent.exe (UAC dialogs)
+        if common.is_admin() and not common.is_system() and "--system" not in sys.argv:
+            common.elevate_to_system()
+
+        # 3. Clean up any broken legacy service entry & ensure normal UAC prompt (never auto-confirm!)
+        common.cleanup_broken_service()
+        cfg = common.load_config()
+        if not cfg.get("uac_secure_desktop", False):
+            common.set_uac_secure_desktop(False)
 
         common.enable_dpi_awareness()
         root = tk.Tk()
         common.apply_tk_scaling(root)
         app = DeskLiteApp(root)
         root.mainloop()
+
 
