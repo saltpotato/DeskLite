@@ -192,6 +192,7 @@
         <button type="button" onclick="sendClipboard()" style="background:#374151; padding:4px 8px; font-size:11px;" title="Send local clipboard text to remote PC">📋 Paste</button>
         <button type="button" onclick="sendShortcut('win_key')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Open Start Menu">🪟 Start</button>
         <button type="button" onclick="sendShortcut('explorer')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Open File Explorer">📁 Explorer</button>
+        <button type="button" id="btnVisionDebug" onclick="toggleVisionDebug()" style="background:#0d9488; padding:4px 8px; font-size:11px;" title="Toggle Android-style Vision Surface Update Debug Coloring">🔬 Debug: ON</button>
       </div>
       <div style="height: 20px; width: 1px; background: #444; margin: 0 4px;"></div>
       <a href="/download/DeskLite.exe" download style="text-decoration:none;">
@@ -226,6 +227,7 @@
       </div>
     </div>
     <canvas id="screenCanvas" style="display:none;"></canvas>
+    <canvas id="debugCanvas" style="display:none; position:absolute; pointer-events:none;"></canvas>
   </div>
 
   <script>
@@ -234,6 +236,11 @@
     let shouldReconnect = false;
     let canvas = document.getElementById("screenCanvas");
     let ctx = canvas.getContext("2d");
+    let debugCanvas = document.getElementById("debugCanvas");
+    let debugCtx = debugCanvas.getContext("2d");
+    let visionDebugMode = true;
+    let debugRects = [];
+    let debugStats = { cache: 0, scroll: 0, jpeg: 0 };
     let statusText = document.getElementById("statusText");
     let badge = document.getElementById("badge");
     let btnConnect = document.getElementById("btnConnect");
@@ -466,6 +473,71 @@
       document.getElementById("welcomeOverlay").style.display = "block";
       document.getElementById("qualityControls").style.display = "none";
       canvas.style.display = "none";
+      debugCanvas.style.display = "none";
+    }
+
+    function toggleVisionDebug() {
+      visionDebugMode = !visionDebugMode;
+      const btn = document.getElementById("btnVisionDebug");
+      if (btn) {
+        btn.innerText = visionDebugMode ? "🔬 Debug: ON" : "🔬 Debug: OFF";
+        btn.style.background = visionDebugMode ? "#0d9488" : "#374151";
+      }
+      if (!visionDebugMode) {
+        debugRects = [];
+        debugCtx.clearRect(0, 0, debugCanvas.width, debugCanvas.height);
+      } else {
+        renderDebugOverlay();
+      }
+    }
+
+    function recordDebugRect(x, y, w, h, kind, label) {
+      if (!visionDebugMode || w <= 0 || h <= 0) return;
+      const now = performance.now();
+      debugRects = debugRects.filter(r => (now - r.ts) <= 950);
+      debugRects.push({ x, y, w, h, kind, label, ts: now });
+      if (debugRects.length > 36) debugRects.shift();
+    }
+
+    function renderDebugOverlay() {
+      if (!visionDebugMode) return;
+      if (debugCanvas.width !== canvas.width || debugCanvas.height !== canvas.height) {
+        debugCanvas.width = canvas.width;
+        debugCanvas.height = canvas.height;
+      }
+      debugCtx.clearRect(0, 0, debugCanvas.width, debugCanvas.height);
+      const palette = {
+        cache:  { fill: "rgba(16, 185, 129, 0.28)", stroke: "#10b981", tag: "rgba(6, 95, 70, 0.9)" },
+        scroll: { fill: "rgba(14, 165, 233, 0.24)", stroke: "#38bdf8", tag: "rgba(12, 74, 110, 0.9)" },
+        jpeg:   { fill: "rgba(244, 63, 94, 0.30)",  stroke: "#fb7185", tag: "rgba(136, 19, 55, 0.9)" },
+        full:   { fill: "rgba(245, 158, 11, 0.16)", stroke: "#fbbf24", tag: "rgba(120, 53, 15, 0.9)" }
+      };
+      debugCtx.font = "600 13px -apple-system, BlinkMacSystemFont, sans-serif";
+      for (const r of debugRects) {
+        const p = palette[r.kind] || palette.jpeg;
+        debugCtx.fillStyle = p.fill;
+        debugCtx.fillRect(r.x, r.y, r.w, r.h);
+        debugCtx.lineWidth = 2;
+        debugCtx.strokeStyle = p.stroke;
+        debugCtx.strokeRect(r.x, r.y, r.w, r.h);
+        if (r.w >= 90 && r.h >= 24) {
+          const tw = Math.min(r.w - 6, Math.max(110, r.label.length * 7.8 + 14));
+          debugCtx.fillStyle = p.tag;
+          debugCtx.fillRect(r.x + 3, r.y + 3, tw, 20);
+          debugCtx.fillStyle = "#ffffff";
+          debugCtx.fillText(r.label, r.x + 8, r.y + 17);
+        }
+      }
+      // Top-left Legend Bar
+      debugCtx.fillStyle = "rgba(15, 23, 42, 0.88)";
+      debugCtx.fillRect(14, 14, 590, 30);
+      debugCtx.strokeStyle = "rgba(56, 189, 248, 0.6)";
+      debugCtx.strokeRect(14, 14, 590, 30);
+      debugCtx.fillStyle = "#f1f5f9";
+      debugCtx.fillText(
+        `🔬 DEBUG  |  🟢 Cache (${debugStats.cache})   🔵 Scroll-Copy (${debugStats.scroll})   🔴 Net-JPEG (${debugStats.jpeg})`,
+        26, 34
+      );
     }
 
     function setQuality(quality, scale) {
@@ -617,6 +689,8 @@
             const cached = vfStateCache.get(sid);
             if (cached) {
               ctx.drawImage(cached, dx, dy, dw, dh);
+              debugStats.cache++;
+              recordDebugRect(dx, dy, dw, dh, "cache", "RAM CACHE (0 KB)");
             }
           } else if (cmd === 0x03 && offset + 17 <= buf.byteLength) {
             // CMD_TRANSFORM_RECT (2D scroll / pan / zoom)
@@ -636,6 +710,9 @@
               }
               vfScratchCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
               ctx.drawImage(vfScratchCanvas, 0, 0, sw, sh, dx, dy, dw, dh);
+              debugStats.scroll++;
+              const shiftY = sy - dy;
+              recordDebugRect(dx, dy, dw, dh, "scroll", `GPU SCROLL (dy:${shiftY > 0 ? "+" : ""}${shiftY}px, 0 KB)`);
             }
           } else if (cmd === 0x04 && offset + 10 <= buf.byteLength) {
             // CMD_MARK_DIRTY
@@ -657,6 +734,8 @@
                 const bmp = await createImageBitmap(blob);
                 ctx.drawImage(bmp, dx, dy, dw, dh);
                 bmp.close();
+                debugStats.jpeg++;
+                recordDebugRect(dx, dy, dw, dh, "jpeg", `NET JPEG (${(jlen / 1024).toFixed(1)} KB)`);
               } catch (e) {}
             } else {
               break;
@@ -683,11 +762,14 @@
             const dy = view.getUint16(4);
             const dw = view.getUint16(6);
             const dh = view.getUint16(8);
+            const jlen = buf.byteLength - 10;
             const blob = new Blob([new Uint8Array(buf, 10)], { type: "image/jpeg" });
             try {
               const bmp = await createImageBitmap(blob);
               ctx.drawImage(bmp, dx, dy, dw, dh);
               bmp.close();
+              debugStats.jpeg++;
+              recordDebugRect(dx, dy, dw, dh, "jpeg", `NET JPEG (${(jlen / 1024).toFixed(1)} KB)`);
             } catch (e) {}
           } else {
             const blob = new Blob([buf], { type: "image/jpeg" });
@@ -698,10 +780,13 @@
                 canvas.height = bmp.height;
               }
               ctx.drawImage(bmp, 0, 0);
+              debugStats.jpeg++;
+              recordDebugRect(0, 0, bmp.width, bmp.height, "full", `FULL FRAME (${(buf.byteLength / 1024).toFixed(1)} KB)`);
               bmp.close();
             } catch (e) {}
           }
         }
+        renderDebugOverlay();
         isRendering = false;
       }
 
@@ -811,6 +896,7 @@
             document.getElementById("welcomeOverlay").style.display = "none";
             document.getElementById("qualityControls").style.display = "flex";
             canvas.style.display = "block";
+            debugCanvas.style.display = "block";
           } else if (msg.status === "error") {
             if (msg.message && (msg.message.toLowerCase().includes("password") || msg.message.toLowerCase().includes("passwort"))) {
               shouldReconnect = false;

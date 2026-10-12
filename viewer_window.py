@@ -103,7 +103,7 @@ class VideoCanvas(QWidget):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         target_rect = QRectF(self.img_pos_x, self.img_pos_y, draw_w, draw_h)
         painter.drawImage(target_rect, qimg)
-        self.viewer.vision_decoder.paint_overlays(painter, target_rect)
+        self.viewer.vision_decoder.paint_overlays(painter, target_rect, qimg)
         painter.end()
 
     def _calc_normalized_coords(self, pos):
@@ -285,11 +285,17 @@ class RemoteDesktopViewer(QWidget):
         tb_layout.addWidget(self._make_btn("📁 Explorer", "#334155", "#475569", lambda: self.send_shortcut("explorer")))
         tb_layout.addWidget(self._make_btn("📋 Paste", "#334155", "#475569", self.send_clipboard_to_host))
         tb_layout.addWidget(self._make_btn("🖥️ Desktop", "#334155", "#475569", lambda: self.send_shortcut("desktop")))
+        tb_layout.addWidget(self._make_btn("🔬 Debug", "#0d9488", "#14b8a6", self.toggle_vision_debug))
 
         root_layout.addWidget(self.toolbar)
 
         self.canvas = VideoCanvas(self)
         root_layout.addWidget(self.canvas, 1)
+
+    def toggle_vision_debug(self):
+        active = self.vision_decoder.toggle_debug()
+        self.canvas.update()
+        self.status_sig.emit(f"🔬 Vision Surface Debug: {'ON' if active else 'OFF'}")
 
     def _update_status_label(self, text):
         self.status_label.setText(text)
@@ -583,11 +589,12 @@ class RemoteDesktopViewer(QWidget):
                             p = QPainter(self.base_qimage)
                             p.drawImage(dx, dy, patch)
                             p.end()
+                            self.vision_decoder.on_dl_patch(dx, dy, dw, dh, len(frame_bytes) - 10)
                 else:
                     qimg = QImage.fromData(frame_bytes)
                     if not qimg.isNull():
                         self.base_qimage = qimg
-                        self.vision_decoder.on_full_frame()
+                        self.vision_decoder.on_full_frame(len(frame_bytes), qimg.width(), qimg.height())
 
             self.canvas.update()
 
