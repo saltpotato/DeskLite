@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from common import get_clipboard_text, set_clipboard_text
+from vision_framework import VisionViewerDecoder
 
 try:
     from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
@@ -102,6 +103,7 @@ class VideoCanvas(QWidget):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         target_rect = QRectF(self.img_pos_x, self.img_pos_y, draw_w, draw_h)
         painter.drawImage(target_rect, qimg)
+        self.viewer.vision_decoder.paint_overlays(painter, target_rect)
         painter.end()
 
     def _calc_normalized_coords(self, pos):
@@ -135,6 +137,9 @@ class VideoCanvas(QWidget):
     def mousePressEvent(self, event):
         self.setFocus()
         pos = event.position()
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self.viewer.vision_decoder.handle_overlay_click(pos, self.viewer.send_input, self.update):
+                return
         nx, ny = self._calc_normalized_coords(pos)
         if nx is not None:
             self.viewer.send_input({"event": "mouse_move", "x": nx, "y": ny})
@@ -201,6 +206,7 @@ class RemoteDesktopViewer(QWidget):
         self.remote_width = 1920
         self.remote_height = 1080
         self.base_qimage = None
+        self.vision_decoder = VisionViewerDecoder()
 
         self.render_pending = False
         self.running = True
@@ -371,7 +377,7 @@ class RemoteDesktopViewer(QWidget):
         self._enqueue_frame(message)
 
     def _enqueue_frame(self, frame_bytes):
-        if frame_bytes[:2] != b"DL":
+        if frame_bytes[:2] not in (b"DL", b"VF"):
             self.frame_queue.clear()
         self.frame_queue.append(frame_bytes)
         if not self.render_pending:
@@ -567,7 +573,9 @@ class RemoteDesktopViewer(QWidget):
         try:
             while self.frame_queue:
                 frame_bytes = self.frame_queue.popleft()
-                if frame_bytes[:2] == b"DL" and len(frame_bytes) > 10:
+                if frame_bytes[:2] == b"VF":
+                    self.vision_decoder.apply_vf_packet(frame_bytes, self.base_qimage)
+                elif frame_bytes[:2] == b"DL" and len(frame_bytes) > 10:
                     if self.base_qimage is not None and not self.base_qimage.isNull():
                         dx, dy, dw, dh = struct.unpack(">HHHH", frame_bytes[2:10])
                         patch = QImage.fromData(frame_bytes[10:])
@@ -579,6 +587,7 @@ class RemoteDesktopViewer(QWidget):
                     qimg = QImage.fromData(frame_bytes)
                     if not qimg.isNull():
                         self.base_qimage = qimg
+                        self.vision_decoder.on_full_frame()
 
             self.canvas.update()
 

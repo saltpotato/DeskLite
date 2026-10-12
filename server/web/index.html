@@ -563,9 +563,13 @@
         enqueueCompleteFrame(buf);
       }
 
+      const vfStateCache = new Map();
+      const vfScratchCanvas = document.createElement("canvas");
+      const vfScratchCtx = vfScratchCanvas.getContext("2d");
+
       function enqueueCompleteFrame(buf) {
         const u8 = new Uint8Array(buf, 0, 2);
-        const isDelta = (u8[0] === 0x44 && u8[1] === 0x4C);
+        const isDelta = (u8[0] === 0x44 && u8[1] === 0x4C) || (u8[0] === 0x56 && u8[1] === 0x46);
         if (!isDelta) {
           frameQueue.length = 0;
         }
@@ -576,11 +580,104 @@
         }
       }
 
+      async function decodeVfPacket(buf) {
+        if (buf.byteLength < 4) return;
+        const view = new DataView(buf);
+        const count = view.getUint8(2);
+        let offset = 3;
+        for (let i = 0; i < count && offset < buf.byteLength; i++) {
+          const cmd = view.getUint8(offset);
+          if (cmd === 0x01 && offset + 17 <= buf.byteLength) {
+            // CMD_SAVE_STATE
+            const sid = view.getBigUint64(offset + 1, false).toString();
+            const sx = view.getUint16(offset + 9, false);
+            const sy = view.getUint16(offset + 11, false);
+            const sw = view.getUint16(offset + 13, false);
+            const sh = view.getUint16(offset + 15, false);
+            offset += 17;
+            if (sw > 0 && sh > 0) {
+              const c = document.createElement("canvas");
+              c.width = sw;
+              c.height = sh;
+              c.getContext("2d").drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+              vfStateCache.set(sid, c);
+              if (vfStateCache.size > 48) {
+                const firstKey = vfStateCache.keys().next().value;
+                vfStateCache.delete(firstKey);
+              }
+            }
+          } else if (cmd === 0x02 && offset + 17 <= buf.byteLength) {
+            // CMD_RESTORE_STATE
+            const sid = view.getBigUint64(offset + 1, false).toString();
+            const dx = view.getUint16(offset + 9, false);
+            const dy = view.getUint16(offset + 11, false);
+            const dw = view.getUint16(offset + 13, false);
+            const dh = view.getUint16(offset + 15, false);
+            offset += 17;
+            const cached = vfStateCache.get(sid);
+            if (cached) {
+              ctx.drawImage(cached, dx, dy, dw, dh);
+            }
+          } else if (cmd === 0x03 && offset + 17 <= buf.byteLength) {
+            // CMD_TRANSFORM_RECT (2D scroll / pan / zoom)
+            const sx = view.getUint16(offset + 1, false);
+            const sy = view.getUint16(offset + 3, false);
+            const sw = view.getUint16(offset + 5, false);
+            const sh = view.getUint16(offset + 7, false);
+            const dx = view.getUint16(offset + 9, false);
+            const dy = view.getUint16(offset + 11, false);
+            const dw = view.getUint16(offset + 13, false);
+            const dh = view.getUint16(offset + 15, false);
+            offset += 17;
+            if (sw > 0 && sh > 0 && dw > 0 && dh > 0) {
+              if (vfScratchCanvas.width < sw || vfScratchCanvas.height < sh) {
+                vfScratchCanvas.width = Math.max(vfScratchCanvas.width, sw);
+                vfScratchCanvas.height = Math.max(vfScratchCanvas.height, sh);
+              }
+              vfScratchCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+              ctx.drawImage(vfScratchCanvas, 0, 0, sw, sh, dx, dy, dw, dh);
+            }
+          } else if (cmd === 0x04 && offset + 10 <= buf.byteLength) {
+            // CMD_MARK_DIRTY
+            const sid = view.getBigUint64(offset + 1, false).toString();
+            offset += 10;
+            vfStateCache.delete(sid);
+          } else if (cmd === 0x05 && offset + 13 <= buf.byteLength) {
+            // CMD_JPEG_PATCH
+            const dx = view.getUint16(offset + 1, false);
+            const dy = view.getUint16(offset + 3, false);
+            const dw = view.getUint16(offset + 5, false);
+            const dh = view.getUint16(offset + 7, false);
+            const jlen = view.getUint32(offset + 9, false);
+            offset += 13;
+            if (offset + jlen <= buf.byteLength) {
+              const blob = new Blob([new Uint8Array(buf, offset, jlen)], { type: "image/jpeg" });
+              offset += jlen;
+              try {
+                const bmp = await createImageBitmap(blob);
+                ctx.drawImage(bmp, dx, dy, dw, dh);
+                bmp.close();
+              } catch (e) {}
+            } else {
+              break;
+            }
+          } else if (cmd === 0x06 && offset + 5 <= buf.byteLength) {
+            // CMD_OVERLAY_META
+            const mlen = view.getUint32(offset + 1, false);
+            offset += 5 + mlen;
+          } else {
+            break;
+          }
+        }
+      }
+
       async function processFrameQueue() {
         while (frameQueue.length > 0) {
           const buf = frameQueue.shift();
           const u8 = new Uint8Array(buf, 0, 2);
-          if (u8[0] === 0x44 && u8[1] === 0x4C && buf.byteLength > 10) {
+          if (u8[0] === 0x56 && u8[1] === 0x46) {
+            await decodeVfPacket(buf);
+          } else if (u8[0] === 0x44 && u8[1] === 0x4C && buf.byteLength > 10) {
             const view = new DataView(buf, 0, 10);
             const dx = view.getUint16(2);
             const dy = view.getUint16(4);

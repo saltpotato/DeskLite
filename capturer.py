@@ -44,8 +44,29 @@ class ScreenCapturer:
 
         self.last_grid = None
         self.last_send_time = 0.0
+        try:
+            from vision_framework import VisionHostPipeline
+            self.vision_pipeline = VisionHostPipeline()
+        except Exception:
+            self.vision_pipeline = None
 
         self._update_monitor()
+
+    def reset_vision_state(self):
+        if self.vision_pipeline is not None:
+            self.vision_pipeline.reset()
+
+    def notify_input(self, evt):
+        if self.vision_pipeline is not None:
+            self.vision_pipeline.notify_input(evt)
+
+    @staticmethod
+    def _encode_jpeg(arr, quality):
+        _, enc = cv2.imencode(".jpg", arr, [
+            int(cv2.IMWRITE_JPEG_QUALITY), int(quality),
+            int(cv2.IMWRITE_JPEG_OPTIMIZE), 0
+        ])
+        return enc.tobytes()
 
     def _init_dxcam(self):
         """Lazily initializes GPU-direct DXGI Desktop Duplication on the active capture thread.
@@ -107,6 +128,7 @@ class ScreenCapturer:
         if scale is not None:
             self.scale = max(0.2, min(1.0, float(scale)))
         self.last_grid = None  # Force next frame to be sent
+        self.reset_vision_state()
 
     def get_cursor_pos(self):
         """Returns cursor coordinates relative to monitor."""
@@ -169,7 +191,7 @@ class ScreenCapturer:
         return raw, False
 
     def capture_frame(self, draw_cursor=False, force=False):
-        """Captures a live frame via DXGI GPU Duplication (with GDI fallback) and encodes to JPEG."""
+        """Captures a live frame via DXGI GPU Duplication (with GDI fallback) and encodes via VisionHostPipeline."""
         now = time.time()
         grabbed, from_dxgi_update = self._grab_frame_array(force=force, now=now)
         if grabbed is None:
@@ -196,11 +218,10 @@ class ScreenCapturer:
                     new_h = max(100, int(self.height * self.scale))
                     img_np = cv2.resize(img_np, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-                _, enc = cv2.imencode(".jpg", img_np, [
-                    int(cv2.IMWRITE_JPEG_QUALITY), self.quality,
-                    int(cv2.IMWRITE_JPEG_OPTIMIZE), 0
-                ])
-                return enc.tobytes()
+                if self.vision_pipeline is not None:
+                    return self.vision_pipeline.encode_frame(img_np, force, self._encode_jpeg, self.quality)
+
+                return self._encode_jpeg(img_np, self.quality)
             except Exception:
                 return None
 

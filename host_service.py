@@ -195,6 +195,7 @@ class HostService:
             # If the viewer was previously counted on the VPS relay, transition it to P2P
             if self.relay_viewers > 0:
                 self.relay_viewers = max(0, self.relay_viewers - 1)
+            self.capturer.reset_vision_state()
             self.force_frame = True
             logging.info("Viewer upgraded to Direct P2P WebSocket (0 KB/s on VPS)!")
             self._update_session_status()
@@ -245,6 +246,7 @@ class HostService:
                 self.webrtc_channels.add(channel)
                 if self.relay_viewers > 0:
                     self.relay_viewers = max(0, self.relay_viewers - 1)
+                self.capturer.reset_vision_state()
                 self.force_frame = True
                 self._update_session_status()
                 self._ensure_background_tasks()
@@ -396,6 +398,7 @@ class HostService:
 
             if msg_type == "viewer_connected":
                 self.relay_viewers += 1
+                self.capturer.reset_vision_state()
                 self.force_frame = True
                 logging.info(f"Viewer connected via signaling! Offering Direct P2P upgrade...")
                 self._update_session_status()
@@ -453,6 +456,7 @@ class HostService:
 
             elif msg_type == "input":
                 evt_data = data.get("data", {})
+                self.capturer.notify_input(evt_data)
                 self.input_controller.handle_event(evt_data)
                 if evt_data.get("event") != "mouse_move":
                     self.force_frame = True
