@@ -72,6 +72,24 @@ class RemoteDesktopViewer(tk.Toplevel):
         self.worker_thread = threading.Thread(target=self._run_async_worker, daemon=True)
         self.worker_thread.start()
 
+    def _make_toolbar_btn(self, text, bg_color, hover_color, command):
+        """Creates a cross-platform toolbar button that preserves dark background and white text on macOS Aqua Tk."""
+        lbl = tk.Label(
+            self.toolbar,
+            text=text,
+            bg=bg_color,
+            fg="white",
+            font=("Segoe UI", 9, "bold"),
+            padx=8,
+            pady=3,
+            cursor="hand2"
+        )
+        lbl.pack(side=tk.RIGHT, padx=3, pady=4)
+        lbl.bind("<ButtonRelease-1>", lambda e: command())
+        lbl.bind("<Enter>", lambda e: lbl.config(bg=hover_color))
+        lbl.bind("<Leave>", lambda e: lbl.config(bg=bg_color))
+        return lbl
+
     def _build_ui(self):
         # Top toolbar
         self.toolbar = tk.Frame(self, bg="#2c3e50", height=32)
@@ -80,40 +98,15 @@ class RemoteDesktopViewer(tk.Toplevel):
         self.status_label = tk.Label(self.toolbar, text="Connecting...", bg="#2c3e50", fg="white", font=("Segoe UI", 9))
         self.status_label.pack(side=tk.LEFT, padx=10, pady=4)
 
-        self.btn_fullscreen = tk.Button(self.toolbar, text="⛶ Fullscreen", bg="#34495e", fg="white",
-                                        relief=tk.FLAT, font=("Segoe UI", 8), command=self.toggle_fullscreen)
-        self.btn_fullscreen.pack(side=tk.RIGHT, padx=4, pady=4)
+        self.btn_desktop = self._make_toolbar_btn("🖥️ Desktop", "#34495e", "#4b6584", lambda: self.send_shortcut("desktop"))
+        self.btn_clip = self._make_toolbar_btn("📋 Paste", "#34495e", "#4b6584", self.send_clipboard_to_host)
+        self.btn_explorer = self._make_toolbar_btn("📁 Explorer", "#34495e", "#4b6584", lambda: self.send_shortcut("explorer"))
+        self.btn_win = self._make_toolbar_btn("🪟 Start", "#34495e", "#4b6584", lambda: self.send_shortcut("win_key"))
+        self.btn_ctrl_alt_del = self._make_toolbar_btn("Ctrl+Alt+Del", "#34495e", "#4b6584", self.send_ctrl_alt_del)
 
-        self.btn_desktop = tk.Button(self.toolbar, text="🖥️ Desktop", bg="#34495e", fg="white",
-                                     relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.send_shortcut("desktop"))
-        self.btn_desktop.pack(side=tk.RIGHT, padx=3, pady=4)
-
-        self.btn_clip = tk.Button(self.toolbar, text="📋 Paste", bg="#34495e", fg="white",
-                                  relief=tk.FLAT, font=("Segoe UI", 8), command=self.send_clipboard_to_host)
-        self.btn_clip.pack(side=tk.RIGHT, padx=3, pady=4)
-        self.btn_explorer = tk.Button(self.toolbar, text="📁 Explorer", bg="#34495e", fg="white",
-                                      relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.send_shortcut("explorer"))
-        self.btn_explorer.pack(side=tk.RIGHT, padx=3, pady=4)
-
-        self.btn_win = tk.Button(self.toolbar, text="🪟 Start", bg="#34495e", fg="white",
-                                 relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.send_shortcut("win_key"))
-        self.btn_win.pack(side=tk.RIGHT, padx=3, pady=4)
-
-        self.btn_ctrl_alt_del = tk.Button(self.toolbar, text="Ctrl+Alt+Del", bg="#34495e", fg="white",
-                                          relief=tk.FLAT, font=("Segoe UI", 8), command=self.send_ctrl_alt_del)
-        self.btn_ctrl_alt_del.pack(side=tk.RIGHT, padx=3, pady=4)
-
-        self.btn_hq = tk.Button(self.toolbar, text="💎 HQ", bg="#8e44ad", fg="white",
-                                relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.set_quality(85, 1.0))
-        self.btn_hq.pack(side=tk.RIGHT, padx=3, pady=4)
-
-        self.btn_balanced = tk.Button(self.toolbar, text="⚖️ Balanced", bg="#2980b9", fg="white",
-                                      relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.set_quality(75, 1.0))
-        self.btn_balanced.pack(side=tk.RIGHT, padx=3, pady=4)
-
-        self.btn_fast = tk.Button(self.toolbar, text="🚀 Fast", bg="#27ae60", fg="white",
-                                  relief=tk.FLAT, font=("Segoe UI", 8), command=lambda: self.set_quality(65, 1.0))
-        self.btn_fast.pack(side=tk.RIGHT, padx=3, pady=4)
+        self.btn_hq = self._make_toolbar_btn("💎 HQ", "#8e44ad", "#9b59b6", lambda: self.set_quality(85, 1.0))
+        self.btn_balanced = self._make_toolbar_btn("⚖️ Balanced", "#2980b9", "#3498db", lambda: self.set_quality(75, 1.0))
+        self.btn_fast = self._make_toolbar_btn("🚀 Fast", "#27ae60", "#2ecc71", lambda: self.set_quality(65, 1.0))
 
         # Canvas with hardware cursor enabled (0ms lag!)
         self.canvas = tk.Canvas(self, bg="black", highlightthickness=0, cursor="arrow")
@@ -511,7 +504,10 @@ class RemoteDesktopViewer(tk.Toplevel):
             self.img_pos_x = (cw - draw_w) // 2
             self.img_pos_y = (ch - draw_h) // 2
 
-            resized = pil_img.resize((draw_w, draw_h), Image.Resampling.BILINEAR)
+            if (draw_w, draw_h) == (pil_img.width, pil_img.height):
+                resized = pil_img
+            else:
+                resized = pil_img.resize((draw_w, draw_h), Image.Resampling.LANCZOS)
 
             photo = ImageTk.PhotoImage(resized)
             self.current_photo = photo
