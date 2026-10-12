@@ -184,6 +184,8 @@ class HostService:
                         elif msg_type == "input":
                             evt_data = data.get("data", {})
                             self.input_controller.handle_event(evt_data)
+                            if evt_data.get("event") != "mouse_move":
+                                self.force_frame = True
                             
                             # Auto-revive stream_task if it died unexpectedly during idle
                             if self.active_viewers > 0 and (stream_task is None or stream_task.done()):
