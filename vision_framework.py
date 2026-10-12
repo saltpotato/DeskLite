@@ -17,6 +17,7 @@ Wire Protocol (`b"VF"` compound packet):
 
 import collections
 import json
+import logging
 import struct
 import time
 import zlib
@@ -129,6 +130,12 @@ class StateCacheRecognizer(BaseRecognizer):
                 "rect": [x, y, w, h],
                 "saved_kb": round(ctx.shared["bytes_saved"] / 1024.0, 1)
             }))
+            if ctx.shared.get("debug_mode", True):
+                logging.info(
+                    f"[VF-DEBUG][HOST] CACHE_HIT hash={curr_hash & 0xFFFFFFFF:08x} "
+                    f"rect=({x},{y},{w}x{h}) saved={est_saved / 1024.0:.1f}KB "
+                    f"total_saved={ctx.shared['bytes_saved'] / 1024.0:.1f}KB"
+                )
             ctx.prev_frame[y:y + h, x:x + w] = curr_roi
             return cmds
 
@@ -198,10 +205,20 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                     "dirty_below": True,
                     "saved_kb": round(ctx.shared["bytes_saved"] / 1024.0, 1)
                 }))
+                if ctx.shared.get("debug_mode", True):
+                    logging.info(
+                        f"[VF-DEBUG][HOST] DIRTY_SLIDER rect=({x},{y},{w}x{h}) "
+                        f"vY={ctx.shared.get('virtual_y', 0):+d}px"
+                    )
             return None
 
         # Verify that shifting prev_roi by (dx, dy) genuinely matches curr_roi in the overlap region!
         if not self._verify_overlap(prev_roi, curr_roi, dx, dy, inner_w, inner_h):
+            if ctx.shared.get("debug_mode", True):
+                logging.info(
+                    f"[VF-DEBUG][HOST] SCROLL_REJECT_OVERLAP rect=({x},{y},{w}x{h}) "
+                    f"dx={dx:+d} dy={dy:+d} (coarse MAD >= 6.0)"
+                )
             return None
 
         if dy != 0:
@@ -222,6 +239,11 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
             target_overlap = ctx.curr_frame[dst_y:dst_y + overlap_h, x:x + inner_w]
             residual_rects = self._find_residual_rects(shifted_overlap, target_overlap, x, dst_y)
             if residual_rects is None:
+                if ctx.shared.get("debug_mode", True):
+                    logging.info(
+                        f"[VF-DEBUG][HOST] SCROLL_REJECT_RESIDUAL rect=({x},{y},{w}x{h}) "
+                        f"dy={dy:+d} (overlap mismatch > threshold)"
+                    )
                 return None
 
             cmds = list(ctx.shared["pending_cmds"])
@@ -253,7 +275,8 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
 
             # 3) Encode newly revealed strip (or restore from Viewer RAM cache if seen before)
             new_strip = ctx.curr_frame[new_y:new_y + sh_abs, x:x + w]
-            cmds.extend(self._encode_or_restore_strip(ctx, new_strip, x, new_y, w, sh_abs))
+            strip_cmds, strip_from_cache = self._encode_or_restore_strip(ctx, new_strip, x, new_y, w, sh_abs)
+            cmds.extend(strip_cmds)
             ctx.prev_frame[new_y:new_y + sh_abs, x:x + w] = new_strip
 
             # 4) Encode narrow right scrollbar track
@@ -284,6 +307,13 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                 "dirty_below": ctx.shared.get("dirty_below", False),
                 "saved_kb": round(ctx.shared["bytes_saved"] / 1024.0, 1)
             }))
+            if ctx.shared.get("debug_mode", True):
+                logging.info(
+                    f"[VF-DEBUG][HOST] SCROLL_Y rect=({x},{y},{w}x{h}) dy={dy:+d}px "
+                    f"vY={ctx.shared['virtual_y']:+d}px strip={'CACHE_HIT' if strip_from_cache else 'NET_JPEG'} "
+                    f"residuals={len(residual_rects)} {residual_rects} "
+                    f"saved_total={ctx.shared['bytes_saved'] / 1024.0:.1f}KB"
+                )
             return cmds
 
         elif dx != 0:
@@ -300,6 +330,10 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
             target_overlap = ctx.curr_frame[y:y + h, dst_x:dst_x + overlap_w]
             residual_rects = self._find_residual_rects(shifted_overlap, target_overlap, dst_x, y)
             if residual_rects is None:
+                if ctx.shared.get("debug_mode", True):
+                    logging.info(
+                        f"[VF-DEBUG][HOST] SCROLL_REJECT_RESIDUAL rect=({x},{y},{w}x{h}) dx={dx:+d}"
+                    )
                 return None
 
             cmds = list(ctx.shared["pending_cmds"])
@@ -317,7 +351,8 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
             ctx.prev_frame[y:y + h, dst_x:dst_x + overlap_w] = shifted_overlap
 
             new_strip = ctx.curr_frame[y:y + h, new_x:new_x + sw_abs]
-            cmds.extend(self._encode_or_restore_strip(ctx, new_strip, new_x, y, sw_abs, h))
+            strip_cmds, strip_from_cache = self._encode_or_restore_strip(ctx, new_strip, new_x, y, sw_abs, h)
+            cmds.extend(strip_cmds)
             ctx.prev_frame[y:y + h, new_x:new_x + sw_abs] = new_strip
 
             for rx, ry, rw, rh in residual_rects:
@@ -335,24 +370,30 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                 "virtual_y": ctx.shared.get("virtual_y", 0),
                 "saved_kb": round(ctx.shared["bytes_saved"] / 1024.0, 1)
             }))
+            if ctx.shared.get("debug_mode", True):
+                logging.info(
+                    f"[VF-DEBUG][HOST] SCROLL_X rect=({x},{y},{w}x{h}) dx={dx:+d}px "
+                    f"strip={'CACHE_HIT' if strip_from_cache else 'NET_JPEG'} "
+                    f"residuals={len(residual_rects)} {residual_rects}"
+                )
             return cmds
 
         return None
 
-    def _encode_or_restore_strip(self, ctx: FrameContext, strip_arr: np.ndarray, sx: int, sy: int, sw: int, sh: int) -> list:
+    def _encode_or_restore_strip(self, ctx: FrameContext, strip_arr: np.ndarray, sx: int, sy: int, sw: int, sh: int):
         shash = fast_region_hash(strip_arr)
         known = ctx.shared["known_states"]
         dirty = ctx.shared["dirty_states"]
         if shash and shash in known and shash not in dirty:
             ctx.shared["bytes_saved"] += max(512, int(sw * sh * 0.12))
             known.move_to_end(shash)
-            return [pack_restore_state(shash, sx, sy, sw, sh)]
+            return [pack_restore_state(shash, sx, sy, sw, sh)], True
 
         out = [pack_jpeg_patch(sx, sy, sw, sh, ctx.encode_jpeg(strip_arr, ctx.quality))]
         if shash:
             out.append(pack_save_state(shash, sx, sy, sw, sh))
             StateCacheRecognizer._commit_known(known, dirty, shash, (sx, sy, sw, sh))
-        return out
+        return out, False
 
     @staticmethod
     def _find_residual_rects(shifted: np.ndarray, target: np.ndarray, base_x: int, base_y: int):
@@ -524,6 +565,7 @@ class VisionHostPipeline:
             "virtual_x": 0,
             "dirty_below": False,
             "bytes_saved": 0,
+            "debug_mode": True,
         }
 
     def register_plugin(self, plugin: BaseRecognizer):
@@ -541,6 +583,10 @@ class VisionHostPipeline:
         self.shared["dirty_below"] = False
 
     def notify_input(self, evt: dict):
+        if evt.get("event") == "vision_debug":
+            self.shared["debug_mode"] = bool(evt.get("enabled", True))
+            logging.info(f"[VF-DEBUG][HOST] Debug logging toggled {'ON' if self.shared['debug_mode'] else 'OFF'}")
+            return
         if evt.get("event") in ("key_down", "mouse_down"):
             self.shared["dirty_below"] = False
         for p in self.plugins:
@@ -710,11 +756,17 @@ class VisionViewerDecoder:
         self.virtual_y = 0
         self.dirty_below = False
 
-    def toggle_debug(self) -> bool:
+    def toggle_debug(self, send_input_fn=None) -> bool:
         self.debug_mode = not self.debug_mode
         if not self.debug_mode:
             self.debug_rects.clear()
         self.last_event_ts = time.time()
+        logging.info(f"[VF-DEBUG][VIEWER] Surface debug mode toggled {'ON' if self.debug_mode else 'OFF'}")
+        if send_input_fn:
+            try:
+                send_input_fn({"event": "vision_debug", "enabled": self.debug_mode})
+            except Exception:
+                pass
         return self.debug_mode
 
     def _record_debug(self, x: int, y: int, w: int, h: int, kind: str, label: str):
@@ -732,12 +784,24 @@ class VisionViewerDecoder:
         self.stats_jpeg_patches += 1
         kb = f"{byte_len / 1024.0:.1f} KB" if byte_len else "Keyframe"
         self._record_debug(0, 0, width, height, "full", f"FULL FRAME ({kb})")
+        if self.debug_mode:
+            logging.info(
+                f"[VF-DEBUG][VIEWER] FULL_KEYFRAME ({width}x{height} {kb}) || "
+                f"stats: hits={self.stats_cache_hits} scroll={self.stats_scroll_blits} "
+                f"jpeg={self.stats_jpeg_patches} ram={len(self.state_cache)}"
+            )
 
     def on_dl_patch(self, dx: int, dy: int, dw: int, dh: int, byte_len: int = 0):
         """Called when a standard `b"DL"` JPEG delta patch arrives."""
         self.stats_jpeg_patches += 1
         kb = f"{byte_len / 1024.0:.1f} KB" if byte_len else "JPEG"
         self._record_debug(dx, dy, dw, dh, "jpeg", f"NET JPEG ({kb})")
+        if self.debug_mode and (dw * dh >= 120 * 80):
+            logging.info(
+                f"[VF-DEBUG][VIEWER] DL_PATCH rect=({dx},{dy},{dw}x{dh}) size={kb} || "
+                f"stats: hits={self.stats_cache_hits} scroll={self.stats_scroll_blits} "
+                f"jpeg={self.stats_jpeg_patches} ram={len(self.state_cache)}"
+            )
 
     def apply_vf_packet(self, data: bytes, base_qimage):
         """Convenience wrapper around apply_packet using PySide6 classes."""
@@ -752,6 +816,7 @@ class VisionViewerDecoder:
         num_cmds = data[2]
         offset = 3
         n = len(data)
+        log_ops = []
 
         # Clear older debug rects from previous frames if a new batch of visual updates starts
         now = time.time()
@@ -777,6 +842,8 @@ class VisionViewerDecoder:
                         while len(self.state_cache) > 96:
                             ev_k, _ = self.state_cache.popitem(last=False)
                             self.dirty_hashes.discard(ev_k)
+                        if self.debug_mode:
+                            log_ops.append(f"SAVE#{shash & 0xFFFF:04x}({sx},{sy},{sw}x{sh})")
 
                 elif cmd == CMD_RESTORE_STATE and offset + 16 <= n:
                     shash, dx, dy, dw, dh = struct.unpack_from(">QHHHH", data, offset)
@@ -787,8 +854,14 @@ class VisionViewerDecoder:
                         self.state_cache.move_to_end(shash)
                         self.stats_cache_hits += 1
                         self._record_debug(dx, dy, dw, dh, "cache", "RAM CACHE (0 KB)")
+                        if self.debug_mode:
+                            log_ops.append(f"CACHE_HIT#{shash & 0xFFFF:04x}({dx},{dy},{dw}x{dh})")
                     else:
                         self._record_debug(dx, dy, dw, dh, "miss", "CACHE MISS!")
+                        logging.warning(
+                            f"[VF-DEBUG][VIEWER] CACHE_MISS hash={shash & 0xFFFFFFFF:08x} rect=({dx},{dy},{dw}x{dh})"
+                        )
+                        log_ops.append(f"CACHE_MISS#{shash & 0xFFFF:04x}({dx},{dy},{dw}x{dh})")
 
                 elif cmd == CMD_TRANSFORM_RECT and offset + 16 <= n:
                     sx, sy, sw, sh, dx, dy, dw, dh = struct.unpack_from(">HHHHHHHH", data, offset)
@@ -801,6 +874,8 @@ class VisionViewerDecoder:
                         shift_x = sx - dx
                         lbl = f"GPU SCROLL (dy:{shift_y:+d}px, 0 KB)" if shift_y else f"GPU SCROLL (dx:{shift_x:+d}px, 0 KB)"
                         self._record_debug(dx, dy, dw, dh, "scroll", lbl)
+                        if self.debug_mode:
+                            log_ops.append(f"SCROLL({sx},{sy},{sw}x{sh})->({dx},{dy}) dy={shift_y:+d} dx={shift_x:+d}")
 
                 elif cmd == CMD_MARK_DIRTY and offset + 9 <= n:
                     shash, flags = struct.unpack_from(">QB", data, offset)
@@ -809,6 +884,8 @@ class VisionViewerDecoder:
                         self.dirty_hashes.add(shash)
                     if flags & 1:
                         self.dirty_below = True
+                    if self.debug_mode:
+                        log_ops.append(f"MARK_DIRTY(flags={flags})")
 
                 elif cmd == CMD_JPEG_PATCH and offset + 12 <= n:
                     dx, dy, dw, dh, jlen = struct.unpack_from(">HHHHI", data, offset)
@@ -820,6 +897,8 @@ class VisionViewerDecoder:
                             p.drawImage(dx, dy, patch)
                             self.stats_jpeg_patches += 1
                             self._record_debug(dx, dy, dw, dh, "jpeg", f"NET JPEG ({jlen / 1024.0:.1f} KB)")
+                            if self.debug_mode:
+                                log_ops.append(f"JPEG({dx},{dy},{dw}x{dh} {jlen / 1024.0:.1f}KB)")
 
                 elif cmd == CMD_OVERLAY_META and offset + 4 <= n:
                     mlen, = struct.unpack_from(">I", data, offset)
@@ -835,6 +914,14 @@ class VisionViewerDecoder:
                     break
         finally:
             p.end()
+
+        if self.debug_mode and log_ops:
+            logging.info(
+                f"[VF-DEBUG][VIEWER] pkt={len(data) / 1024.0:.1f}KB: {' | '.join(log_ops)} || "
+                f"stats: hits={self.stats_cache_hits} scroll={self.stats_scroll_blits} "
+                f"jpeg={self.stats_jpeg_patches} ram={len(self.state_cache)} "
+                f"vY={self.virtual_y:+d}px saved={self.saved_kb:.1f}KB"
+            )
 
     def _update_meta(self, meta: dict):
         self.last_event = meta.get("event", "")
@@ -1014,7 +1101,7 @@ class VisionViewerDecoder:
         pos_y = pos.y() if hasattr(pos, "y") else float(pos[1])
 
         if self.btn_debug_rect and self.btn_debug_rect.contains(pos_x, pos_y):
-            self.toggle_debug()
+            self.toggle_debug(send_input_fn)
             if update_fn:
                 update_fn()
             return True
@@ -1023,6 +1110,8 @@ class VisionViewerDecoder:
             self.bookmarked_y = self.virtual_y
             self.dirty_below = False
             self.last_event_ts = time.time()
+            if self.debug_mode:
+                logging.info(f"[VF-DEBUG][VIEWER] Bookmark set at vY={self.bookmarked_y:+d}px")
             if update_fn:
                 update_fn()
             return True
@@ -1032,6 +1121,11 @@ class VisionViewerDecoder:
             if abs(diff_y) >= 20:
                 ticks = max(1, min(25, round(abs(diff_y) / 90.0)))
                 delta_dir = 1 if diff_y > 0 else -1
+                if self.debug_mode:
+                    logging.info(
+                        f"[VF-DEBUG][VIEWER] Auto-scroll back from vY={self.virtual_y:+d}px "
+                        f"to bookmark={self.bookmarked_y:+d}px ({ticks} wheel ticks)"
+                    )
                 for _ in range(ticks):
                     send_input_fn({"event": "mouse_wheel", "delta": delta_dir})
                 self.virtual_y = self.bookmarked_y

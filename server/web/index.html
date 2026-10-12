@@ -483,6 +483,10 @@
         btn.innerText = visionDebugMode ? "🔬 Debug: ON" : "🔬 Debug: OFF";
         btn.style.background = visionDebugMode ? "#0d9488" : "#374151";
       }
+      console.info(`[VF-DEBUG][WEB] Surface debug mode toggled ${visionDebugMode ? "ON" : "OFF"}`);
+      if (isConnected) {
+        sendMsg(JSON.stringify({ type: "input", data: { event: "vision_debug", enabled: visionDebugMode } }));
+      }
       if (!visionDebugMode) {
         debugRects = [];
         debugCtx.clearRect(0, 0, debugCanvas.width, debugCanvas.height);
@@ -497,6 +501,12 @@
       debugRects = debugRects.filter(r => (now - r.ts) <= 950);
       debugRects.push({ x, y, w, h, kind, label, ts: now });
       if (debugRects.length > 36) debugRects.shift();
+      if (kind !== "jpeg" || (w * h >= 120 * 80)) {
+        console.info(
+          `[VF-DEBUG][WEB] ${kind.toUpperCase()} rect=(${x},${y},${w}x${h}) ${label} || ` +
+          `stats: hits=${debugStats.cache} scroll=${debugStats.scroll} jpeg=${debugStats.jpeg}`
+        );
+      }
     }
 
     function renderDebugOverlay() {

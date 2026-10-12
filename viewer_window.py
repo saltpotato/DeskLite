@@ -293,7 +293,7 @@ class RemoteDesktopViewer(QWidget):
         root_layout.addWidget(self.canvas, 1)
 
     def toggle_vision_debug(self):
-        active = self.vision_decoder.toggle_debug()
+        active = self.vision_decoder.toggle_debug(self.send_input)
         self.canvas.update()
         self.status_sig.emit(f"🔬 Vision Surface Debug: {'ON' if active else 'OFF'}")
 
