@@ -682,8 +682,9 @@
               c.width = sw;
               c.height = sh;
               c.getContext("2d").drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+              vfStateCache.delete(sid);
               vfStateCache.set(sid, c);
-              if (vfStateCache.size > 48) {
+              while (vfStateCache.size > 256) {
                 const firstKey = vfStateCache.keys().next().value;
                 vfStateCache.delete(firstKey);
               }
@@ -698,6 +699,8 @@
             offset += 17;
             const cached = vfStateCache.get(sid);
             if (cached) {
+              vfStateCache.delete(sid);
+              vfStateCache.set(sid, cached);
               ctx.drawImage(cached, dx, dy, dw, dh);
               debugStats.cache++;
               recordDebugRect(dx, dy, dw, dh, "cache", "RAM CACHE (0 KB)");

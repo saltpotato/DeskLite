@@ -253,14 +253,14 @@ class StateCacheRecognizer(BaseRecognizer):
         known[shash] = rect
         known.move_to_end(shash)
         dirty_set.discard(shash)
-        while len(known) > 128:
+        while len(known) > 160:
             evicted, _ = known.popitem(last=False)
             dirty_set.discard(evicted)
 
 
 class Scroll2DAndSliderRecognizer(BaseRecognizer):
     """
-    Detects 2D scrolling (vertical Δy and horizontal Δx) + monitors vertical/horizontal
+    Detects 2D scrolling (vertical dy and horizontal dx) + monitors vertical/horizontal
     scrollbar sliders to mark offscreen cached content as DIRTY when a document grows!
     Includes closed-loop residual patching so stationary UI elements (sticky headers,
     sidebars, borders, cursors) inside a scrolling bounding box never smear.
@@ -280,23 +280,36 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
         inner_w = w - sb_w
         inner_h = h - sb_w
 
-        # 1. Detect vertical shift (Δy) using fast 1D row-luminance profile correlation
-        dy = self._detect_1d_shift(
+        # 1. Detect vertical shift candidates (dy) using normalized 1D gradient correlation
+        dy_candidates = self._detect_1d_shift_candidates(
             prev_roi[:inner_h, :inner_w, 1],
             curr_roi[:inner_h, :inner_w, 1],
             axis=1,
             max_shift=min(h // 2, 360)
         )
+        dy = 0
+        best_score = 0.0
+        for cand_dy in dy_candidates:
+            ok, score = self._verify_overlap(prev_roi, curr_roi, 0, cand_dy, inner_w, inner_h)
+            if ok and score > best_score:
+                dy = cand_dy
+                best_score = score
 
-        # 2. Detect horizontal shift (Δx) if vertical shift is 0
+        # 2. Detect horizontal shift candidates (dx) if vertical shift is 0
         dx = 0
+        dx_candidates = []
         if dy == 0:
-            dx = self._detect_1d_shift(
+            dx_candidates = self._detect_1d_shift_candidates(
                 prev_roi[:inner_h, :inner_w, 1],
                 curr_roi[:inner_h, :inner_w, 1],
                 axis=0,
                 max_shift=min(w // 2, 360)
             )
+            for cand_dx in dx_candidates:
+                ok, score = self._verify_overlap(prev_roi, curr_roi, cand_dx, 0, inner_w, inner_h)
+                if ok and score > best_score:
+                    dx = cand_dx
+                    best_score = score
 
         # 3. Check vertical scrollbar strip (right edge) for offscreen content growth (DIRTY check)
         slider_changed = self._check_scrollbar_dirty(prev_roi[:, inner_w:], curr_roi[:, inner_w:])
@@ -306,8 +319,8 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                 ctx.shared["pending_cmds"].append(pack_mark_dirty(0, 1))
                 ctx.shared["pending_cmds"].append(pack_overlay_meta({
                     "event": "dirty_below",
-                    "viewport": [x, y, w, h],
-                    "virtual_y": ctx.shared.get("virtual_y", 0),
+                    "viewport": [int(x), int(y), int(w), int(h)],
+                    "virtual_y": int(ctx.shared.get("virtual_y", 0)),
                     "dirty_below": True,
                     "saved_kb": round(ctx.shared["bytes_saved"] / 1024.0, 1)
                 }))
@@ -316,14 +329,12 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                         f"[VF-DEBUG][HOST] DIRTY_SLIDER rect=({x},{y},{w}x{h}) "
                         f"vY={ctx.shared.get('virtual_y', 0):+d}px"
                     )
-            return None
-
-        # Verify that shifting prev_roi by (dx, dy) genuinely matches curr_roi in the overlap region!
-        if not self._verify_overlap(prev_roi, curr_roi, dx, dy, inner_w, inner_h):
-            if ctx.shared.get("debug_mode", True):
+            elif (dy_candidates or dx_candidates) and ctx.shared.get("debug_mode", True):
+                c_dy = dy_candidates[0] if dy_candidates else 0
+                c_dx = dx_candidates[0] if dx_candidates else 0
                 logging.info(
                     f"[VF-DEBUG][HOST] SCROLL_REJECT_OVERLAP rect=({x},{y},{w}x{h}) "
-                    f"dx={dx:+d} dy={dy:+d} (coarse MAD >= 6.0)"
+                    f"cand_dx={c_dx:+d} cand_dy={c_dy:+d} (match_ratio < 0.68)"
                 )
             return None
 
@@ -341,7 +352,7 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                 out_y = y + h - sh_abs
 
             # Check residual differences inside the shifted overlap (sticky headers, sidebars, borders)
-            shifted_overlap = ctx.prev_frame[src_y:src_y + overlap_h, x:x + inner_w].copy()
+            shifted_overlap = ctx.prev_frame[src_y:src_y + overlap_h, x:x + inner_w]
             target_overlap = ctx.curr_frame[dst_y:dst_y + overlap_h, x:x + inner_w]
             residual_rects = self._find_residual_rects(shifted_overlap, target_overlap, x, dst_y)
             if residual_rects is None:
@@ -363,7 +374,7 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
             ctx.shared["pending_post_save"] = None
 
             ctx.shared["virtual_y"] = ctx.shared.get("virtual_y", 0) + dy
-            ctx.shared["viewport"] = [x, y, w, h]
+            ctx.shared["viewport"] = [int(x), int(y), int(w), int(h)]
 
             # 1) Save outgoing strip into Viewer RAM cache BEFORE shifting over it
             out_roi = ctx.prev_frame[out_y:out_y + sh_abs, x:x + w]
@@ -377,24 +388,24 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                 x, src_y, inner_w, overlap_h,
                 x, dst_y, inner_w, overlap_h
             ))
-            ctx.prev_frame[dst_y:dst_y + overlap_h, x:x + inner_w] = shifted_overlap
 
             # 3) Encode newly revealed strip (or restore from Viewer RAM cache if seen before)
             new_strip = ctx.curr_frame[new_y:new_y + sh_abs, x:x + w]
             strip_cmds, strip_from_cache = self._encode_or_restore_strip(ctx, new_strip, x, new_y, w, sh_abs)
             cmds.extend(strip_cmds)
-            ctx.prev_frame[new_y:new_y + sh_abs, x:x + w] = new_strip
 
             # 4) Encode narrow right scrollbar track
             sb_strip = ctx.curr_frame[dst_y:dst_y + overlap_h, x + inner_w:x + w]
             cmds.append(pack_jpeg_patch(x + inner_w, dst_y, sb_w, overlap_h, ctx.encode_jpeg(sb_strip, ctx.quality)))
-            ctx.prev_frame[dst_y:dst_y + overlap_h, x + inner_w:x + w] = sb_strip
 
             # 5) Patch any stationary/sticky UI sub-rectangles inside the overlap so nothing ever smears!
             for rx, ry, rw, rh in residual_rects:
                 res_patch = ctx.curr_frame[ry:ry + rh, rx:rx + rw]
                 cmds.append(pack_jpeg_patch(rx, ry, rw, rh, ctx.encode_jpeg(res_patch, ctx.quality)))
-                ctx.prev_frame[ry:ry + rh, rx:rx + rw] = res_patch
+
+            # Sync prev_frame to curr_frame inside the scroll viewport so sub-threshold AA differences
+            # never accumulate across consecutive scroll frames or pollute subsequent mouse hovers!
+            ctx.prev_frame[y:y + h, x:x + w] = ctx.curr_frame[y:y + h, x:x + w]
 
             # 6) Save the complete post-scroll viewport state in Viewer RAM cache
             post_hash = fast_region_hash(ctx.curr_frame[y:y + h, x:x + w])
@@ -406,10 +417,10 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
             ctx.shared["bytes_saved"] += est_saved
             cmds.append(pack_overlay_meta({
                 "event": "scroll",
-                "dx": dx,
-                "dy": dy,
-                "viewport": [x, y, w, h],
-                "virtual_y": ctx.shared["virtual_y"],
+                "dx": int(dx),
+                "dy": int(dy),
+                "viewport": [int(x), int(y), int(w), int(h)],
+                "virtual_y": int(ctx.shared["virtual_y"]),
                 "dirty_below": ctx.shared.get("dirty_below", False),
                 "saved_kb": round(ctx.shared["bytes_saved"] / 1024.0, 1)
             }))
@@ -432,7 +443,7 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                 src_x, dst_x = x, x + sw_abs
                 new_x = x
 
-            shifted_overlap = ctx.prev_frame[y:y + h, src_x:src_x + overlap_w].copy()
+            shifted_overlap = ctx.prev_frame[y:y + h, src_x:src_x + overlap_w]
             target_overlap = ctx.curr_frame[y:y + h, dst_x:dst_x + overlap_w]
             residual_rects = self._find_residual_rects(shifted_overlap, target_overlap, dst_x, y)
             if residual_rects is None:
@@ -454,26 +465,25 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
 
             ctx.shared["virtual_x"] = ctx.shared.get("virtual_x", 0) + dx
             cmds.append(pack_transform_rect(src_x, y, overlap_w, h, dst_x, y, overlap_w, h))
-            ctx.prev_frame[y:y + h, dst_x:dst_x + overlap_w] = shifted_overlap
 
             new_strip = ctx.curr_frame[y:y + h, new_x:new_x + sw_abs]
             strip_cmds, strip_from_cache = self._encode_or_restore_strip(ctx, new_strip, new_x, y, sw_abs, h)
             cmds.extend(strip_cmds)
-            ctx.prev_frame[y:y + h, new_x:new_x + sw_abs] = new_strip
 
             for rx, ry, rw, rh in residual_rects:
                 res_patch = ctx.curr_frame[ry:ry + rh, rx:rx + rw]
                 cmds.append(pack_jpeg_patch(rx, ry, rw, rh, ctx.encode_jpeg(res_patch, ctx.quality)))
-                ctx.prev_frame[ry:ry + rh, rx:rx + rw] = res_patch
+
+            ctx.prev_frame[y:y + h, x:x + w] = ctx.curr_frame[y:y + h, x:x + w]
 
             est_saved = max(512, int(overlap_w * h * 0.10))
             ctx.shared["bytes_saved"] += est_saved
             cmds.append(pack_overlay_meta({
                 "event": "scroll_x",
-                "dx": dx,
+                "dx": int(dx),
                 "dy": 0,
-                "viewport": [x, y, w, h],
-                "virtual_y": ctx.shared.get("virtual_y", 0),
+                "viewport": [int(x), int(y), int(w), int(h)],
+                "virtual_y": int(ctx.shared.get("virtual_y", 0)),
                 "saved_kb": round(ctx.shared["bytes_saved"] / 1024.0, 1)
             }))
             if ctx.shared.get("debug_mode", True):
@@ -506,14 +516,14 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
         """
         Compares the shifted overlap region against the true target region on a 4x4 grid.
         Peels off stationary top/bottom headers and left/right borders into thin strips
-        plus any interior residual box so L-shaped borders never inflate into full-screen boxes.
+        plus any clustered interior stationary elements (ignoring isolated 1-cell ClearType shimmer).
         Returns None if the mismatch area exceeds 32% of the overlap (abort scroll transform).
         """
         oh, ow = shifted.shape[:2]
         if oh < 8 or ow < 8:
             return []
         diff = np.abs(shifted[::4, ::4, :3].astype(np.int16) - target[::4, ::4, :3].astype(np.int16)).max(axis=2)
-        bad = diff > 12
+        bad = diff > 16
         bad_ratio = float(bad.mean())
         if bad_ratio > 0.32:
             return None
@@ -530,7 +540,7 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
             r0 += 1
         if r0 > 0:
             py2 = min(oh, r0 * 4 + 4)
-            rects.append((base_x, base_y, ow, py2))
+            rects.append((int(base_x), int(base_y), int(ow), int(py2)))
 
         # 2. Peel stationary bottom rows (e.g. bottom border or sticky footer)
         orig_r1 = r1
@@ -538,7 +548,7 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
             r1 -= 1
         if r1 < orig_r1:
             py1 = max(0, r1 * 4 - 4)
-            rects.append((base_x, base_y + py1, ow, oh - py1))
+            rects.append((int(base_x), int(base_y + py1), int(ow), int(oh - py1)))
 
         # 3. Peel stationary left columns (e.g. left border or sidebar)
         mid_y1 = min(oh, r0 * 4)
@@ -549,7 +559,7 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                 c0 += 1
             if c0 > 0:
                 px2 = min(ow, c0 * 4 + 4)
-                rects.append((base_x, base_y + mid_y1, px2, mid_h))
+                rects.append((int(base_x), int(base_y + mid_y1), int(px2), int(mid_h)))
 
             # 4. Peel stationary right columns
             orig_c1 = c1
@@ -557,19 +567,37 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                 c1 -= 1
             if c1 < orig_c1:
                 px1 = max(0, c1 * 4 - 4)
-                rects.append((base_x + px1, base_y + mid_y1, ow - px1, mid_h))
+                rects.append((int(base_x + px1), int(base_y + mid_y1), int(ow - px1), int(mid_h)))
 
-        # 5. Any remaining interior mismatch (e.g. floating button or mouse cursor)
+        # 5. Any remaining interior stationary elements (filter out isolated 1-cell ClearType AA noise)
         if r0 < r1 and c0 < c1:
             sub = bad[r0:r1, c0:c1]
-            ys, xs = np.nonzero(sub)
-            if ys.size > 0:
-                iy1 = max(0, (r0 + int(ys.min())) * 4 - 4)
-                iy2 = min(oh, (r0 + int(ys.max()) + 1) * 4 + 4)
-                ix1 = max(0, (c0 + int(xs.min())) * 4 - 4)
-                ix2 = min(ow, (c0 + int(xs.max()) + 1) * 4 + 4)
-                if ix2 > ix1 and iy2 > iy1:
-                    rects.append((base_x + ix1, base_y + iy1, ix2 - ix1, iy2 - iy1))
+            if np.any(sub):
+                if HAS_CV2 and sub.shape[0] >= 3 and sub.shape[1] >= 3:
+                    sub_u8 = sub.astype(np.uint8)
+                    # Filter out single isolated 4x4 cells that have no neighbors in a 3x3 window
+                    nbr_count = cv2.boxFilter(sub_u8, ddepth=-1, ksize=(3, 3), normalize=False)
+                    clustered = (sub_u8 > 0) & (nbr_count >= 2)
+                    if np.any(clustered):
+                        dil = cv2.dilate(clustered.astype(np.uint8), np.ones((5, 5), dtype=np.uint8))
+                        num_l, _, stats, _ = cv2.connectedComponentsWithStats(dil, connectivity=8)
+                        for lid in range(1, min(num_l, 5)):
+                            gx, gy, gw_c, gh_c = int(stats[lid, 0]), int(stats[lid, 1]), int(stats[lid, 2]), int(stats[lid, 3])
+                            iy1 = max(0, (r0 + gy) * 4)
+                            iy2 = min(oh, (r0 + gy + gh_c) * 4)
+                            ix1 = max(0, (c0 + gx) * 4)
+                            ix2 = min(ow, (c0 + gx + gw_c) * 4)
+                            if ix2 > ix1 and iy2 > iy1:
+                                rects.append((int(base_x + ix1), int(base_y + iy1), int(ix2 - ix1), int(iy2 - iy1)))
+                else:
+                    ys, xs = np.nonzero(sub)
+                    if ys.size >= 2:
+                        iy1 = max(0, (r0 + int(ys.min())) * 4 - 4)
+                        iy2 = min(oh, (r0 + int(ys.max()) + 1) * 4 + 4)
+                        ix1 = max(0, (c0 + int(xs.min())) * 4 - 4)
+                        ix2 = min(ow, (c0 + int(xs.max()) + 1) * 4 + 4)
+                        if ix2 > ix1 and iy2 > iy1:
+                            rects.append((int(base_x + ix1), int(base_y + iy1), int(ix2 - ix1), int(iy2 - iy1)))
 
         total_area = sum(rw * rh for _, _, rw, rh in rects)
         if total_area > (ow * oh * 0.42):
@@ -577,44 +605,65 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
         return rects
 
     @staticmethod
-    def _detect_1d_shift(prev_g: np.ndarray, curr_g: np.ndarray, axis: int, max_shift: int) -> int:
+    def _detect_1d_shift_candidates(prev_g: np.ndarray, curr_g: np.ndarray, axis: int, max_shift: int) -> list[int]:
         """
-        Finds the pixel shift along `axis` (1=vertical dy, 0=horizontal dx) using
-        1D gradient projections. Runs in <0.5ms in numpy.
+        Finds up to 3 ranked candidate pixel shifts along `axis` (1=vertical dy, 0=horizontal dx)
+        using normalized 1D gradient Pearson correlation across all lags. Runs in <0.4ms in numpy.
         """
         p1 = prev_g.mean(axis=axis, dtype=np.float32)
         p2 = curr_g.mean(axis=axis, dtype=np.float32)
         d1 = np.diff(p1)
         d2 = np.diff(p2)
         n = len(d1)
-        if n < 64 or float(np.std(d1)) < 0.8 or float(np.std(d2)) < 0.8:
-            return 0
+        if n < 64 or float(np.std(d1)) < 0.6 or float(np.std(d2)) < 0.6:
+            return []
 
         margin = min(max_shift, n // 3)
         if margin < 8:
-            return 0
+            return []
         tpl = d2[margin:n - margin]
+        tpl_len = len(tpl)
+        if tpl_len < 16:
+            return []
         tpl_norm = tpl - tpl.mean()
         tpl_energy = float(np.dot(tpl_norm, tpl_norm))
         if tpl_energy < 1e-3:
-            return 0
+            return []
 
-        corr = np.correlate(d1 - d1.mean(), tpl_norm, mode="valid")
-        best_idx = int(np.argmax(corr))
-        shift = best_idx - margin  # >0 means content moved UP/LEFT by `shift` px
-        if abs(shift) < 6:
-            return 0
+        d1_zm = d1 - d1.mean()
+        corr = np.correlate(d1_zm, tpl_norm, mode="valid")
+        cs = np.cumsum(np.insert(d1_zm * d1_zm, 0, 0.0))
+        seg_energies = np.maximum(1e-5, cs[tpl_len:] - cs[:-tpl_len])
+        norm_corr = corr / np.sqrt(seg_energies * tpl_energy)
 
-        seg = d1[best_idx:best_idx + len(tpl)]
-        seg_norm = seg - seg.mean()
-        denom = float(np.sqrt(np.dot(seg_norm, seg_norm) * tpl_energy))
-        if denom <= 1e-5 or (float(corr[best_idx]) / denom) < 0.80:
-            return 0
-        return shift
+        # Zero out tiny shifts (< 4px)
+        center = margin
+        lo = max(0, center - 3)
+        hi = min(len(norm_corr), center + 4)
+        norm_corr_work = norm_corr.copy()
+        norm_corr_work[lo:hi] = -1.0
+
+        candidates = []
+        for _ in range(3):
+            best_idx = int(np.argmax(norm_corr_work))
+            best_val = float(norm_corr_work[best_idx])
+            if best_val < 0.65:
+                break
+            shift = best_idx - margin
+            if abs(shift) >= 4:
+                candidates.append(int(shift))
+            # Suppress neighborhood around this peak to find distinct secondary peaks
+            s_lo = max(0, best_idx - 5)
+            s_hi = min(len(norm_corr_work), best_idx + 6)
+            norm_corr_work[s_lo:s_hi] = -1.0
+
+        return candidates
 
     @staticmethod
-    def _verify_overlap(prev_roi: np.ndarray, curr_roi: np.ndarray, dx: int, dy: int, w: int, h: int) -> bool:
-        """Verifies that the shifted overlapping region genuinely matches on a coarse 8x8 pixel grid."""
+    def _verify_overlap(prev_roi: np.ndarray, curr_roi: np.ndarray, dx: int, dy: int, w: int, h: int) -> tuple[bool, float]:
+        """Verifies that the shifted overlapping region genuinely matches on a coarse 8x8 pixel grid.
+        Uses outlier-robust inlier ratio (percentage of pixels within <= 12 RGB units) so sticky
+        headers or sidebars never skew the score."""
         if dy > 0:
             a = prev_roi[dy:h:8, :w:8, :3]
             b = curr_roi[:h - dy:8, :w:8, :3]
@@ -631,9 +680,10 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
             b = curr_roi[:h:8, s:w:8, :3]
 
         if a.size == 0 or a.shape != b.shape:
-            return False
-        mad = float(np.abs(a.astype(np.int16) - b.astype(np.int16)).mean())
-        return mad < 6.0
+            return False, 0.0
+        diff_max = np.abs(a.astype(np.int16) - b.astype(np.int16)).max(axis=2)
+        inlier_ratio = float((diff_max <= 12).mean())
+        return inlier_ratio >= 0.68, inlier_ratio
 
     @staticmethod
     def _check_scrollbar_dirty(prev_sb: np.ndarray, curr_sb: np.ndarray) -> bool:
@@ -814,12 +864,18 @@ class VisionHostPipeline:
 
             for u_rect in micro_rects:
                 micro_count += 1
-                u_cmds = self._process_single_rect(self.prev_frame, curr_frame, u_rect, encode_jpeg_fn, quality)
+                u_cmds = self._process_single_rect(
+                    self.prev_frame, curr_frame, u_rect, encode_jpeg_fn, quality,
+                    run_plugins=(u_rect != m_rect or mw < 160 or mh < 120)
+                )
                 if u_cmds is None:
                     # Single massive un-cached screen change (>= 75% of screen area) -> send full keyframe
                     self.prev_frame = curr_frame.copy()
                     return encode_jpeg_fn(curr_frame, quality)
                 all_cmds.extend(u_cmds)
+
+            # Guarantee 100% of the processed Macro Island is synced in prev_frame so no pixel ever sticks
+            self.prev_frame[my:my + mh, mx:mx + mw] = curr_frame[my:my + mh, mx:mx + mw]
 
         if all_cmds:
             if micro_count > 1 and self.shared.get("debug_mode", True):
@@ -829,23 +885,24 @@ class VisionHostPipeline:
         return None
 
     def _process_single_rect(self, prev_frame: np.ndarray, curr_frame: np.ndarray,
-                             dirty_rect: tuple, encode_jpeg_fn, quality: int):
+                             dirty_rect: tuple, encode_jpeg_fn, quality: int, run_plugins: bool = True):
         """
         Runs registered Recognizer plugins on a single `dirty_rect` and returns a list of
         VF binary command chunks, or `None` if the rect covers >= 75% of the screen.
         """
-        self.shared["pending_cmds"].clear()
-        self.shared["pending_pre_save"] = None
-        self.shared["pending_post_save"] = None
-        ctx = FrameContext(prev_frame, curr_frame, dirty_rect, encode_jpeg_fn, quality, self.shared)
+        if run_plugins:
+            self.shared["pending_cmds"].clear()
+            self.shared["pending_pre_save"] = None
+            self.shared["pending_post_save"] = None
+            ctx = FrameContext(prev_frame, curr_frame, dirty_rect, encode_jpeg_fn, quality, self.shared)
 
-        for plugin in self.plugins:
-            try:
-                result_cmds = plugin.analyze(ctx)
-                if result_cmds:
-                    return result_cmds
-            except Exception:
-                continue
+            for plugin in self.plugins:
+                try:
+                    result_cmds = plugin.analyze(ctx)
+                    if result_cmds:
+                        return result_cmds
+                except Exception:
+                    continue
 
         x, y, w, h = dirty_rect
         if w * h >= curr_frame.shape[0] * curr_frame.shape[1] * 0.75:
@@ -1046,7 +1103,7 @@ class VisionViewerDecoder:
                         self.state_cache[shash] = sub_img
                         self.state_cache.move_to_end(shash)
                         self.dirty_hashes.discard(shash)
-                        while len(self.state_cache) > 96:
+                        while len(self.state_cache) > 256:
                             ev_k, _ = self.state_cache.popitem(last=False)
                             self.dirty_hashes.discard(ev_k)
                         if self.debug_mode:
