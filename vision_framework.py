@@ -253,7 +253,7 @@ class StateCacheRecognizer(BaseRecognizer):
         known[shash] = rect
         known.move_to_end(shash)
         dirty_set.discard(shash)
-        while len(known) > 160:
+        while len(known) > 240:
             evicted, _ = known.popitem(last=False)
             dirty_set.discard(evicted)
 
@@ -912,16 +912,27 @@ class WindowMove2DRecognizer(BaseRecognizer):
 
 class AnimationCycleRecognizer(BaseRecognizer):
     """
-    Detects recurring UI animations (e.g. 'Working...' text shimmer, spinners, pulsing dots,
-    indeterminate progress bars) where consecutive frame deltas are spatially adjacent or
-    tightly interwoven ('benachbart oder eng verwoben'):
+    Detects recurring UI animations (e.g. 'Working...' text shimmer, Progress Circle spinners,
+    pulsing dots, indeterminate progress bars) where consecutive frame deltas are spatially
+    adjacent or tightly interwoven ('benachbart oder eng verwoben'):
     1. Merges adjacent/overlapping small dirty rects across consecutive frames into a
-       stable Canonical Animation Bounding Box `U = (ux, uy, uw, uh)`.
-    2. Stores perceptual thumbnails + Viewer RAM cache hashes for up to 32 phases of `U`.
-    3. Detects recursion/cycles (`mad <= 4.5` perceptual match against learned keyframes of `U`)
-       and replays the animation from the Viewer's RAM cache with 0 KB JPEG transfer!
+       4px-padded Canonical Animation Bounding Box `U = (ux, uy, uw, uh)`.
+    2. Stores area-averaged 16x16 perceptual thumbnails + Viewer RAM cache hashes for up to
+       64 phases of `U`.
+    3. Detects recursion/cycles via perceptual matching and replays the animation from the
+       Viewer's RAM cache with 0 KB JPEG transfer!
     """
     name = "AnimationCycleRecognizer"
+
+    @staticmethod
+    def _make_thumb(roi: np.ndarray) -> tuple[np.ndarray, float]:
+        bgr = roi[:, :, :3]
+        std_val = float(bgr.std())
+        if HAS_CV2 and bgr.shape[0] >= 8 and bgr.shape[1] >= 8:
+            th = cv2.resize(bgr, (16, 16), interpolation=cv2.INTER_AREA).astype(np.int16)
+        else:
+            th = bgr[::2, ::2].astype(np.int16)
+        return th, std_val
 
     def analyze(self, ctx: FrameContext):
         x, y, w, h = ctx.dirty_rect
@@ -929,6 +940,7 @@ class AnimationCycleRecognizer(BaseRecognizer):
         if w < 12 or h < 12 or w > 420 or h > 140 or (w * h) > 48000:
             return None
 
+        fh, fw = ctx.curr_frame.shape[:2]
         now = time.time()
         hotspots: list = ctx.shared.setdefault("anim_hotspots", [])
         # Prune expired hotspots (inactive for > 3.0 seconds)
@@ -948,22 +960,31 @@ class AnimationCycleRecognizer(BaseRecognizer):
                 break
 
         if matched_hs is None:
+            px1 = max(0, (int(x) - 2) & ~3)
+            py1 = max(0, (int(y) - 2) & ~3)
+            px2 = min(fw, (int(x + w) + 5) & ~3)
+            py2 = min(fh, (int(y + h) + 5) & ~3)
             hotspots.append({
-                "rect": [int(x), int(y), int(w), int(h)],
+                "rect": [px1, py1, px2 - px1, py2 - py1],
                 "hits": 1,
                 "last_ts": now,
-                "keyframes": [],  # list of (shash, thumb_int16)
+                "last_hit_hash": None,
+                "keyframes": [],  # list of (khash, krect, kthumb, kstd)
             })
             if len(hotspots) > 16:
                 hotspots.pop(0)
             return None
 
-        # Check if dirty_rect expands the hotspot's canonical union box U = (ux, uy, uw, uh)
+        # Check if dirty_rect (with 2px anti-aliasing margin) expands the hotspot's canonical union box U
         hx, hy, hw, hh = matched_hs["rect"]
-        ux1 = min(int(x), hx)
-        uy1 = min(int(y), hy)
-        ux2 = max(int(x + w), hx + hw)
-        uy2 = max(int(y + h), hy + hh)
+        px1 = max(0, (int(x) - 2) & ~3)
+        py1 = max(0, (int(y) - 2) & ~3)
+        px2 = min(fw, (int(x + w) + 5) & ~3)
+        py2 = min(fh, (int(y + h) + 5) & ~3)
+        ux1 = min(px1, hx)
+        uy1 = min(py1, hy)
+        ux2 = max(px2, hx + hw)
+        uy2 = max(py2, hy + hh)
         uw, uh = ux2 - ux1, uy2 - uy1
         if uw > 420 or uh > 140 or (uw * uh) > 48000:
             return None
@@ -979,31 +1000,53 @@ class AnimationCycleRecognizer(BaseRecognizer):
             return None
 
         ux, uy, uw, uh = matched_hs["rect"]
+        curr_u = ctx.curr_frame[uy:uy + uh, ux:ux + uw]
+        prev_u = ctx.prev_frame[uy:uy + uh, ux:ux + uw]
+        curr_u_thumb, curr_u_std = self._make_thumb(curr_u)
+        prev_u_thumb, _ = self._make_thumb(prev_u)
+        u_step_mad = float(np.abs(curr_u_thumb - prev_u_thumb).mean())
 
-        # 1. Recursion / Cycle Check: compare against learned keyframes that encompass dirty_rect
+        # 1. Recursion / Cycle Check:
+        # A learned keyframe k is a true cycle hit if it encompasses dirty_rect AND is closer to
+        # curr_frame than prev_frame already is (mad < step_mad * 0.85), preventing false self-hits
+        # against the immediately preceding frame during Loop 1.
         best_hash = None
         best_rect = None
         best_mad = 999.0
+        last_hit = matched_hs.get("last_hit_hash")
         valid_kf = []
-        for khash, krect, kthumb in matched_hs["keyframes"]:
+        num_kf = len(matched_hs["keyframes"])
+
+        for khash, krect, kthumb, kstd in matched_hs["keyframes"]:
             if khash not in known or khash in dirty_set or known[khash] != krect:
                 continue
-            valid_kf.append((khash, krect, kthumb))
+            valid_kf.append((khash, krect, kthumb, kstd))
+            if khash == last_hit:
+                continue
             kx, ky, kw, kh = krect
             if not (kx <= x and ky <= y and kx + kw >= x + w and ky + kh >= y + h):
                 continue
-            kstep = 2 if (kw * kh < 8192) else 4
-            c_sub = ctx.curr_frame[ky:ky + kh:kstep, kx:kx + kw:kstep, :3].astype(np.int16)
+            if krect == (ux, uy, uw, uh):
+                c_sub, c_std = curr_u_thumb, curr_u_std
+                step_mad = u_step_mad
+            else:
+                c_sub, c_std = self._make_thumb(ctx.curr_frame[ky:ky + kh, kx:kx + kw])
+                p_sub, _ = self._make_thumb(ctx.prev_frame[ky:ky + kh, kx:kx + kw])
+                step_mad = float(np.abs(c_sub - p_sub).mean())
             if c_sub.shape != kthumb.shape:
                 continue
             diff = np.abs(c_sub - kthumb)
             mad = float(diff.mean())
-            if mad < best_mad:
-                inlier = float((diff.max(axis=2) <= 12).mean())
-                if mad <= 4.5 and inlier >= 0.90:
-                    best_mad = mad
-                    best_hash = khash
-                    best_rect = krect
+            if mad < best_mad and mad < max(2.2, step_mad * 0.85):
+                inlier = float((diff.max(axis=2) <= 14).mean())
+                mean_shift = float(np.abs(c_sub.mean(axis=(0, 1)) - kthumb.mean(axis=(0, 1))).max())
+                is_spinner = (kw <= 84 and kh <= 84 and abs(kw - kh) <= 28 and num_kf >= 8)
+                std_ok = (kstd > 3.5 and 0.65 <= (c_std / kstd) <= 1.45) if kstd > 3.5 else (c_std <= 5.0)
+                if mean_shift <= 10.0 and std_ok:
+                    if (mad <= 5.2 and inlier >= 0.88) or (is_spinner and mad <= 8.5):
+                        best_mad = mad
+                        best_hash = khash
+                        best_rect = krect
         matched_hs["keyframes"] = valid_kf
 
         cmds = []
@@ -1012,6 +1055,7 @@ class AnimationCycleRecognizer(BaseRecognizer):
             # Cycle hit! Replay this animation frame directly from the Viewer's RAM cache (0 KB JPEG)
             ctx.shared["pending_pre_save"] = None
             ctx.shared["pending_post_save"] = None
+            matched_hs["last_hit_hash"] = best_hash
             known.move_to_end(best_hash)
             cmds.append(pack_restore_state(best_hash, bx, by, bw, bh))
             est_saved = max(1024, int(bw * bh * 0.14))
@@ -1031,10 +1075,7 @@ class AnimationCycleRecognizer(BaseRecognizer):
             return cmds
 
         # 2. First pass of this animation phase: learn & cache the unified canonical box U = (ux, uy, uw, uh)
-        curr_u = ctx.curr_frame[uy:uy + uh, ux:ux + uw]
         prev_u = ctx.prev_frame[uy:uy + uh, ux:ux + uw]
-        step = 2 if (uw * uh < 8192) else 4
-        curr_thumb = curr_u[::step, ::step, :3].astype(np.int16)
 
         ctx.shared["pending_pre_save"] = None
         ctx.shared["pending_post_save"] = None
@@ -1044,8 +1085,8 @@ class AnimationCycleRecognizer(BaseRecognizer):
             if prev_hash and prev_hash not in known:
                 cmds.append(pack_save_state(prev_hash, ux, uy, uw, uh))
                 StateCacheRecognizer._commit_known(known, dirty_set, prev_hash, (ux, uy, uw, uh))
-                prev_thumb = prev_u[::step, ::step, :3].astype(np.int16)
-                matched_hs["keyframes"].append((prev_hash, (ux, uy, uw, uh), prev_thumb))
+                prev_thumb, prev_std = self._make_thumb(prev_u)
+                matched_hs["keyframes"].append((prev_hash, (ux, uy, uw, uh), prev_thumb, prev_std))
 
         jpeg_bytes = ctx.encode_jpeg(curr_u, ctx.quality)
         cmds.append(pack_jpeg_patch(ux, uy, uw, uh, jpeg_bytes))
@@ -1054,8 +1095,9 @@ class AnimationCycleRecognizer(BaseRecognizer):
         if curr_hash:
             cmds.append(pack_save_state(curr_hash, ux, uy, uw, uh))
             StateCacheRecognizer._commit_known(known, dirty_set, curr_hash, (ux, uy, uw, uh))
-            matched_hs["keyframes"].append((curr_hash, (ux, uy, uw, uh), curr_thumb))
-            if len(matched_hs["keyframes"]) > 32:
+            matched_hs["keyframes"].append((curr_hash, (ux, uy, uw, uh), curr_u_thumb, curr_u_std))
+            matched_hs["last_hit_hash"] = curr_hash
+            if len(matched_hs["keyframes"]) > 64:
                 matched_hs["keyframes"].pop(0)
 
         if ctx.shared.get("debug_mode", True):
@@ -1148,7 +1190,7 @@ class VisionHostPipeline:
     @classmethod
     def _extract_dirty_rects(cls, prev_frame: np.ndarray, curr_frame: np.ndarray,
                              mask: np.ndarray, base_gx: int, base_gy: int,
-                             fw: int, fh: int, bridge_cells: int = 2, max_rects: int = 6) -> list[tuple]:
+                             fw: int, fh: int, bridge_cells: int = 2, max_rects: int = 8) -> list[tuple]:
         """
         Splits a 4x4-grid boolean change mask into pixel-tight connected-component bounding boxes.
         Bridges gaps up to `bridge_cells * 4` pixels so characters/borders of a single UI control
@@ -1171,7 +1213,7 @@ class VisionHostPipeline:
             kernel = np.ones((ksize, ksize), dtype=np.uint8)
             dilated = cv2.dilate(mask.astype(np.uint8), kernel)
             num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dilated, connectivity=8)
-            if 1 < num_labels <= max_rects + 1:
+            if num_labels > 1:
                 rects = []
                 for lid in range(1, num_labels):
                     gx1, gy1, gw, gh = int(stats[lid, 0]), int(stats[lid, 1]), int(stats[lid, 2]), int(stats[lid, 3])
@@ -1180,6 +1222,24 @@ class VisionHostPipeline:
                     if c_ys.size > 0:
                         rects.append(_make_rect(c_xs, c_ys, base_gx + gx1, base_gy + gy1))
                 if rects:
+                    # If there are more islands than max_rects, merge smallest islands into their nearest
+                    # neighbor rather than collapsing the entire screen into a single giant bounding box!
+                    while len(rects) > max_rects:
+                        rects.sort(key=lambda r: r[2] * r[3], reverse=True)
+                        sx, sy, sw, sh = rects.pop()
+                        best_idx = 0
+                        best_cost = 1 << 60
+                        for idx, ( tx, ty, tw, th) in enumerate(rects):
+                            ux1, uy1 = min(sx, tx), min(sy, ty)
+                            ux2, uy2 = max(sx + sw, tx + tw), max(sy + sh, ty + th)
+                            cost = (ux2 - ux1) * (uy2 - uy1) - (tw * th)
+                            if cost < best_cost:
+                                best_cost = cost
+                                best_idx = idx
+                        tx, ty, tw, th = rects[best_idx]
+                        ux1, uy1 = min(sx, tx), min(sy, ty)
+                        ux2, uy2 = max(sx + sw, tx + tw), max(sy + sh, ty + th)
+                        rects[best_idx] = (ux1, uy1, ux2 - ux1, uy2 - uy1)
                     return rects
 
         return [_make_rect(xs, ys, base_gx, base_gy)]
@@ -1192,7 +1252,9 @@ class VisionHostPipeline:
         and returns a `b"VF"` vision packet or full keyframe.
         """
         fh, fw = curr_frame.shape[:2]
-        if force or self.prev_frame is None or self.prev_frame.shape != curr_frame.shape:
+        # Note: `force=True` from input events wakes up the capture grabber, but must NOT wipe out
+        # delta encoding when `self.prev_frame` is already valid (connection/quality resets call `reset()`).
+        if self.prev_frame is None or self.prev_frame.shape != curr_frame.shape:
             self.prev_frame = curr_frame.copy()
             return encode_jpeg_fn(curr_frame, quality)
 
@@ -1204,7 +1266,7 @@ class VisionHostPipeline:
             return None
 
         # Step 1: Extract Macro Islands (32px gap bridging keeps scrolling pages & dialogs intact)
-        macro_rects = self._extract_dirty_rects(self.prev_frame, curr_frame, mask, 0, 0, fw, fh, bridge_cells=8, max_rects=4)
+        macro_rects = self._extract_dirty_rects(self.prev_frame, curr_frame, mask, 0, 0, fw, fh, bridge_cells=8, max_rects=8)
         all_cmds = []
         micro_count = 0
 
@@ -1236,7 +1298,7 @@ class VisionHostPipeline:
             gy1, gy2 = my // 4, min(mask.shape[0], (my + mh + 3) // 4)
             gx1, gx2 = mx // 4, min(mask.shape[1], (mx + mw + 3) // 4)
             sub_mask = mask[gy1:gy2, gx1:gx2]
-            micro_rects = self._extract_dirty_rects(self.prev_frame, curr_frame, sub_mask, gx1, gy1, fw, fh, bridge_cells=2, max_rects=6)
+            micro_rects = self._extract_dirty_rects(self.prev_frame, curr_frame, sub_mask, gx1, gy1, fw, fh, bridge_cells=2, max_rects=8)
 
             for u_rect in micro_rects:
                 micro_count += 1
