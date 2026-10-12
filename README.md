@@ -31,14 +31,14 @@ A lightweight, high-performance Remote Desktop system built in Python — featur
              │                    (1. Direct LAN/VPN WS  |  2. WebRTC STUN UDP)               │
              │                                                                                │
              └───────────────►  ┌──────────────────────────────────────────┐  ◄───────────────┘
-                1. Handshake    │     DeskLite Signaling Server (VPS)      │    1. Handshake
-                   Only         │      Port: 8765 (Auth + ICE Broker)      │       Only
+                1. Handshake    │   DeskLite ID / Rendezvous Server (VPS)  │    1. Handshake
+                   Only         │      Port: 8765 (Auth + P2P Broker)      │       Only
                                 └──────────────────────────────────────────┘
 ```
 
 ---
 
-## 🚀 1. Start the Signaling & Web Server (Docker)
+## 🚀 1. Start the ID / Rendezvous & Web Server (Docker)
 
 Copy the `server/` directory to your VPS or clone the repository there:
 
@@ -47,7 +47,7 @@ cd server
 docker compose up -d --build
 ```
 
-The server listens on port `8765`, serves the HTML5 Web Viewer, and brokers P2P connections between hosts and viewers (acting as a fallback relay only if direct P2P is blocked by a strict firewall).  
+The server listens on port `8765`, serves the HTML5 Web Viewer, and acts as an **ID / Rendezvous Server** that brokers direct P2P connections between hosts and viewers (serving as a fallback relay only if direct P2P is blocked by a strict firewall).  
 *(Optional: Put a reverse proxy like Nginx or Caddy in front of it for HTTPS / `wss://`.)*
 
 ---
@@ -77,8 +77,8 @@ The compiled binary is placed in `server/web/download/DeskLite.exe` so it can be
 
 ## 🎮 3. Usage
 
-1. **Configure Signaling Server:**
-   - Enter your server address in the *Relay Server* field at the bottom (`ws://YOUR_SERVER_IP:8765` or `wss://your-domain.com`) and click **Save**.
+1. **Configure ID / Rendezvous Server:**
+   - Enter your server address in the *ID Server* field at the bottom (`ws://YOUR_SERVER_IP:8765` or `wss://your-domain.com`) and click **Save**.
 2. **Share This PC (Host):**
    - Your **9-digit ID** (e.g. `384 192 741`) and **One-Time Password** are displayed on the left card.
    - Click **🔄 New** at any time to generate a new ID or password.

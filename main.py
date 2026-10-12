@@ -120,7 +120,7 @@ class DeskLiteApp:
         server_row = ttk.Frame(bottom_frame)
         server_row.pack(fill=tk.X, pady=(0, 6))
 
-        ttk.Label(server_row, text="Relay Server:").pack(side=tk.LEFT)
+        ttk.Label(server_row, text="ID Server:").pack(side=tk.LEFT)
         self.entry_server = ttk.Entry(server_row, width=24)
         self.entry_server.insert(0, self.config.get("relay_server", "ws://localhost:8765"))
         self.entry_server.pack(side=tk.LEFT, padx=6)
@@ -214,7 +214,7 @@ class DeskLiteApp:
         self.config["relay_server"] = new_server
         common.save_config(self.config)
         self.start_host_service()
-        messagebox.showinfo("Saved", f"Relay server updated: {new_server}")
+        messagebox.showinfo("Saved", f"ID / Rendezvous server updated: {new_server}")
 
     def on_mode_change(self, event=None):
         val = self.combo_mode.get()
