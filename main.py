@@ -322,6 +322,10 @@ if __name__ == "__main__":
     if "--service" in sys.argv:
         run_as_service()
     else:
+        # 0. If a DeskLite window is already running, focus it immediately and exit
+        if common.focus_existing_instance():
+            sys.exit(0)
+
         # 1. Enforce Administrator privileges on start (via pythonw.exe so no console stays open)
         if not common.is_admin():
             common.restart_as_admin()
@@ -331,7 +335,10 @@ if __name__ == "__main__":
         if common.is_admin() and not common.is_system() and "--system" not in sys.argv:
             common.elevate_to_system()
 
-        # 3. Clean up any broken legacy service entry & ensure normal UAC prompt (never auto-confirm!)
+        # 3. Acquire single-instance mutex so multiple host instances can never conflict
+        common.ensure_single_instance()
+
+        # 4. Clean up any broken legacy service entry & ensure normal UAC prompt (never auto-confirm!)
         common.cleanup_broken_service()
         cfg = common.load_config()
         if not cfg.get("uac_secure_desktop", False):
@@ -342,5 +349,6 @@ if __name__ == "__main__":
         common.apply_tk_scaling(root)
         app = DeskLiteApp(root)
         root.mainloop()
+
 
 

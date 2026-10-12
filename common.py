@@ -550,6 +550,54 @@ def cleanup_broken_service(service_name="DeskLiteService"):
         pass
 
 
+_SINGLE_INSTANCE_MUTEX = None
+
+
+def focus_existing_instance():
+    """Finds an already open DeskLite window, brings it to the foreground, and returns True if found."""
+    if sys.platform != "win32":
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        titles = (
+            "DeskLite [SYSTEM] - Remote Desktop",
+            "DeskLite [Administrator] - Remote Desktop",
+            "DeskLite - Remote Desktop",
+        )
+        for title in titles:
+            hwnd = user32.FindWindowW(None, title)
+            if hwnd:
+                user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                user32.SetForegroundWindow(hwnd)
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def ensure_single_instance():
+    """Acquires a named Windows Mutex to guarantee only one DeskLite host instance runs at a time."""
+    global _SINGLE_INSTANCE_MUTEX
+    if sys.platform != "win32":
+        return
+    if focus_existing_instance():
+        sys.exit(0)
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        _SINGLE_INSTANCE_MUTEX = kernel32.CreateMutexW(None, False, "Local\\DeskLite_SingleInstance_Mutex")
+        err = ctypes.get_last_error()
+        # ERROR_ALREADY_EXISTS = 183, ERROR_ACCESS_DENIED = 5 (mutex held by SYSTEM/Admin instance)
+        if err in (183, 5):
+            focus_existing_instance()
+            sys.exit(0)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
+
+
 def install_service(service_name="DeskLiteService"):
     """Installs DeskLite as a Windows background service under SYSTEM account."""
     if sys.platform != "win32":
