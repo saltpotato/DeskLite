@@ -4,7 +4,7 @@ import time
 import mss
 import sys
 import ctypes
-from common import ensure_desktop_access
+from common import ensure_desktop_access, impersonate_interactive_user, revert_to_self
 
 try:
     import cv2
@@ -38,13 +38,16 @@ class ScreenCapturer:
         self._update_monitor()
 
     def _init_dxcam(self):
-        """Lazily initializes GPU-direct DXGI Desktop Duplication on the active capture thread."""
+        """Lazily initializes GPU-direct DXGI Desktop Duplication on the active capture thread.
+        Impersonates the interactive user token during DuplicateOutput because Windows DXGI
+        blocks raw NT AUTHORITY\\SYSTEM tokens with E_ACCESSDENIED."""
         if not HAS_DXCAM or sys.platform != "win32":
             return
         now = time.time()
         if now - self.last_dx_init_try < 5.0:
             return
         self.last_dx_init_try = now
+        impersonated = False
         try:
             if self.dx_cam is not None:
                 try:
@@ -52,12 +55,16 @@ class ScreenCapturer:
                 except Exception:
                     pass
                 self.dx_cam = None
+            impersonated = impersonate_interactive_user()
             out_idx = max(0, self.monitor_index - 1)
             self.dx_cam = dxcam.create(output_idx=out_idx, output_color="BGRA")
             logging.info("DXGI Desktop Duplication (dxcam) GPU capture active.")
         except Exception as e:
             logging.debug(f"DXGI init fallback to GDI: {e}")
             self.dx_cam = None
+        finally:
+            if impersonated:
+                revert_to_self()
 
     def _release_capture_resources(self):
         try:
@@ -124,7 +131,7 @@ class ScreenCapturer:
                     if gpu_frame is not None:
                         return gpu_frame, True
                     # If no new GPU frame is flagged and we don't need a forced/heartbeat frame, skip immediately!
-                    if not force and self.last_grid is not None and (now - self.last_send_time < 1.5):
+                    if not force and (now - self.last_send_time < 1.5):
                         return None, False
                 except Exception:
                     try:
@@ -133,7 +140,7 @@ class ScreenCapturer:
                         pass
                     self.dx_cam = None
 
-        # 2. Fallback / Force-verification path: Win32 GDI BitBlt (mss)
+        # 2. Fallback / UAC Secure Desktop path: Win32 GDI BitBlt (mss)
         try:
             raw = self.sct.grab(self.monitor)
         except Exception:
@@ -161,16 +168,17 @@ class ScreenCapturer:
         if HAS_CV2 and isinstance(grabbed, np.ndarray):
             try:
                 img_np = grabbed
-                fh, fw = img_np.shape[:2]
 
-                # Ultra-fast 0.16ms uint32 strided grid view (::4, ::4)
-                grid = img_np.view(np.uint32).reshape(fh, fw)[::4, ::4]
+                # Only run the CPU uint32 grid diff check when using the GDI fallback path!
+                # When from_dxgi_update is True, the DXGI Desktop Duplication API already guaranteed a GPU change.
+                if not from_dxgi_update:
+                    fh, fw = img_np.shape[:2]
+                    grid = img_np.view(np.uint32).reshape(fh, fw)[::4, ::4]
+                    if not force and self.last_grid is not None and self.last_grid.shape == grid.shape:
+                        if not np.any(grid != self.last_grid) and (now - self.last_send_time < 1.5):
+                            return None
+                    self.last_grid = grid.copy()
 
-                if not force and not from_dxgi_update and self.last_grid is not None and self.last_grid.shape == grid.shape:
-                    if not np.any(grid != self.last_grid) and (now - self.last_send_time < 1.5):
-                        return None
-
-                self.last_grid = grid.copy()
                 self.last_send_time = now
 
                 if self.scale != 1.0 and 0.1 <= self.scale < 1.0:

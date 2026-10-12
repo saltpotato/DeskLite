@@ -300,6 +300,98 @@ def elevate_to_system():
         pass
     return False
 
+def impersonate_interactive_user():
+    """Temporarily impersonates the interactive logged-on user (explorer.exe) on the current thread.
+    Required by Windows DXGI (IDXGIOutput1::DuplicateOutput), which blocks raw SYSTEM tokens with E_ACCESSDENIED."""
+    if sys.platform != "win32" or not is_system():
+        return False
+    try:
+        import ctypes.wintypes as wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.ProcessIdToSessionId.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.ProcessIdToSessionId.restype = wintypes.BOOL
+        kernel32.GetCurrentProcessId.argtypes = []
+        kernel32.GetCurrentProcessId.restype = wintypes.DWORD
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        advapi32.OpenProcessToken.restype = wintypes.BOOL
+        advapi32.ImpersonateLoggedOnUser.argtypes = [wintypes.HANDLE]
+        advapi32.ImpersonateLoggedOnUser.restype = wintypes.BOOL
+
+        my_session = wintypes.DWORD(0)
+        kernel32.ProcessIdToSessionId(kernel32.GetCurrentProcessId(), ctypes.byref(my_session))
+
+        h_snap = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+        if not h_snap or h_snap == wintypes.HANDLE(-1).value:
+            return False
+
+        pe = PROCESSENTRY32W()
+        pe.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        explorer_pid = 0
+        if kernel32.Process32FirstW(h_snap, ctypes.byref(pe)):
+            while True:
+                if pe.szExeFile.lower() == "explorer.exe":
+                    proc_sess = wintypes.DWORD(0)
+                    if kernel32.ProcessIdToSessionId(pe.th32ProcessID, ctypes.byref(proc_sess)):
+                        if proc_sess.value == my_session.value:
+                            explorer_pid = pe.th32ProcessID
+                            break
+                if not kernel32.Process32NextW(h_snap, ctypes.byref(pe)):
+                    break
+        kernel32.CloseHandle(h_snap)
+        if not explorer_pid:
+            return False
+
+        h_proc = kernel32.OpenProcess(0x0400, False, explorer_pid) or kernel32.OpenProcess(0x1000, False, explorer_pid)
+        if not h_proc:
+            return False
+
+        h_tok = wintypes.HANDLE()
+        ok = False
+        # TOKEN_QUERY (0x0008) | TOKEN_DUPLICATE (0x0002) | TOKEN_IMPERSONATE (0x0004)
+        if advapi32.OpenProcessToken(h_proc, 0x000E, ctypes.byref(h_tok)):
+            ok = bool(advapi32.ImpersonateLoggedOnUser(h_tok))
+            kernel32.CloseHandle(h_tok)
+        kernel32.CloseHandle(h_proc)
+        return ok
+    except Exception:
+        return False
+
+def revert_to_self():
+    """Reverts thread impersonation back to the process SYSTEM token."""
+    if sys.platform != "win32":
+        return
+    try:
+        ctypes.windll.advapi32.RevertToSelf()
+    except Exception:
+        pass
+
+
 def get_clipboard_text():
     """Reads unicode text from Windows clipboard."""
     if sys.platform != "win32":

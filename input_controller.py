@@ -66,6 +66,11 @@ class InputController:
             self.last_y = self.top + int(ny * self.height)
             if sys.platform == "win32":
                 ctypes.windll.user32.SetCursorPos(self.last_x, self.last_y)
+                scr_w = max(1, ctypes.windll.user32.GetSystemMetrics(0))
+                scr_h = max(1, ctypes.windll.user32.GetSystemMetrics(1))
+                norm_x = int(self.last_x * 65535 / scr_w)
+                norm_y = int(self.last_y * 65535 / scr_h)
+                ctypes.windll.user32.mouse_event(0x8000 | 0x0001, norm_x, norm_y, 0, 0)
             else:
                 self.mouse.position = (self.last_x, self.last_y)
 
