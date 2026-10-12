@@ -37,12 +37,12 @@ def render_app_image(size=512):
     p.drawRoundedRect(rect, 102, 102)
 
     # 2. Smaller Desktop Monitor (compact, generous breathing room)
-    mon_rect = QRectF(116, 150, 240, 158)
-    scr_grad = QLinearGradient(116, 150, 356, 308)
+    mon_rect = QRectF(112, 148, 240, 158)
+    scr_grad = QLinearGradient(112, 148, 352, 306)
     scr_grad.setColorAt(0.0, QColor("#09101d"))
     scr_grad.setColorAt(1.0, QColor("#132847"))
 
-    bezel_grad = QLinearGradient(116, 150, 116, 356)
+    bezel_grad = QLinearGradient(112, 148, 112, 356)
     bezel_grad.setColorAt(0.0, QColor("#94a3b8"))
     bezel_grad.setColorAt(1.0, QColor("#64748b"))
 
@@ -57,13 +57,34 @@ def render_app_image(size=512):
 
     # Monitor Stand & Base
     p.setPen(QPen(QBrush(bezel_grad), 12, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-    p.drawLine(QPointF(236, 312), QPointF(236, 350))
-    p.drawLine(QPointF(186, 352), QPointF(286, 352))
+    p.drawLine(QPointF(232, 310), QPointF(232, 348))
+    p.drawLine(QPointF(182, 350), QPointF(282, 350))
 
-    # 3. Smaller minimalist feather resting lightly on the right edge of the monitor
+    # 3. Cartoon swaying-down motion lines (curved wafting arcs above & below the feather)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+
+    waft1 = QPainterPath()
+    waft1.moveTo(228, 218)
+    waft1.quadTo(278, 224, 326, 198)
+    p.setPen(QPen(QColor(125, 211, 252, 150), 4.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.drawPath(waft1)
+
+    waft2 = QPainterPath()
+    waft2.moveTo(246, 192)
+    waft2.quadTo(282, 196, 314, 178)
+    p.setPen(QPen(QColor(125, 211, 252, 95), 3.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.drawPath(waft2)
+
+    sway = QPainterPath()
+    sway.moveTo(244, 314)
+    sway.quadTo(308, 328, 364, 290)
+    p.setPen(QPen(QColor(125, 211, 252, 110), 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.drawPath(sway)
+
+    # 4. Smaller minimalist feather pulled further inward, gently floating down
     p.save()
-    p.translate(352, 232)
-    p.rotate(-28)
+    p.translate(306, 262)
+    p.rotate(-18)
     p.scale(0.68, 0.68)
 
     feather = QPainterPath()
