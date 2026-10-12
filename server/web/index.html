@@ -88,24 +88,72 @@
     .badge.green { background: #10b981; }
     .badge.yellow { background: #f59e0b; }
 
-    /* Immersive fullscreen mode */
+    /* Immersive fullscreen mode (macOS & browser safe: stays 14px below y=0 top edge!) */
+    #fsPullTab {
+      display: none;
+      position: fixed;
+      top: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 25;
+      background: rgba(18, 18, 24, 0.78);
+      backdrop-filter: blur(8px);
+      color: #e2e8f0;
+      border: 1px solid rgba(96, 165, 250, 0.45);
+      border-radius: 999px;
+      padding: 5px 16px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+      opacity: 0.45;
+      transition: opacity 0.2s ease, transform 0.2s ease, background 0.2s ease;
+      user-select: none;
+    }
+    #fsPullTab:hover {
+      opacity: 1;
+      background: rgba(37, 99, 235, 0.92);
+      transform: translateX(-50%) scale(1.04);
+    }
+    #btnPinToolbar {
+      display: none;
+      background: #374151;
+      padding: 4px 8px;
+      font-size: 11px;
+    }
+    #btnPinToolbar.pinned {
+      background: #2563eb;
+    }
+    body.is-fullscreen #fsPullTab {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    body.is-fullscreen.toolbar-open #fsPullTab {
+      display: none;
+    }
+    body.is-fullscreen #btnPinToolbar {
+      display: inline-block;
+    }
     body.is-fullscreen header {
       position: fixed;
-      top: 0;
+      top: 14px;
       left: 50%;
-      transform: translateX(-50%) translateY(-90%);
-      background: rgba(18, 18, 24, 0.92);
-      backdrop-filter: blur(8px);
-      border-radius: 0 0 10px 10px;
-      border: 1px solid #444;
-      border-top: none;
-      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6);
-      transition: transform 0.25s ease;
-      opacity: 0.15;
+      transform: translateX(-50%) translateY(-140%);
+      background: rgba(18, 18, 24, 0.94);
+      backdrop-filter: blur(10px);
+      border-radius: 12px;
+      border: 1px solid #4b5563;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.7);
+      transition: transform 0.22s ease, opacity 0.22s ease;
+      opacity: 0;
+      pointer-events: none;
+      max-width: 96vw;
     }
-    body.is-fullscreen header:hover {
+    body.is-fullscreen.toolbar-open header {
       transform: translateX(-50%) translateY(0);
       opacity: 1;
+      pointer-events: auto;
     }
     body.is-fullscreen #viewport {
       width: 100vw;
@@ -114,7 +162,11 @@
   </style>
 </head>
 <body>
-  <header id="mainHeader">
+  <div id="fsPullTab" onmouseenter="openFsToolbar()" onclick="openFsToolbar()" title="Show DeskLite Controls">
+    <span>⚡ DeskLite</span>
+    <span style="font-size:10px; opacity:0.8;">▾</span>
+  </div>
+  <header id="mainHeader" onmouseenter="cancelFsToolbarHide()" onmouseleave="scheduleFsToolbarHide()">
     <h1>⚡ DeskLite</h1>
     <div class="controls">
       <input type="text" id="targetId" list="recentPartnersList" placeholder="Host ID (e.g. 123 456)" size="14" oninput="onTargetIdInput()">
@@ -122,6 +174,7 @@
       <input type="password" id="targetPwd" placeholder="Password" size="10">
       <button id="btnConnect" onclick="toggleConnect()">Connect</button>
       <button id="btnFullscreen" type="button" onclick="toggleFullscreen()">⛶ Fullscreen</button>
+      <button id="btnPinToolbar" type="button" onclick="togglePinToolbar()" title="Pin / Unpin toolbar in fullscreen">📌 Pin</button>
       <div id="qualityControls" style="display:none; align-items:center; gap:4px;">
         <div style="height: 20px; width: 1px; background: #444; margin: 0 2px;"></div>
         <button type="button" onclick="setQuality(65, 1.0)" style="background:#059669; padding:4px 8px; font-size:11px;" title="Very fast, native 1:1 sharpness">🚀 Fast</button>
@@ -279,6 +332,46 @@
       badge.className = "badge " + (type || "");
     }
 
+    let fsToolbarPinned = false;
+    let fsHideTimer = null;
+
+    function openFsToolbar() {
+      if (fsHideTimer) {
+        clearTimeout(fsHideTimer);
+        fsHideTimer = null;
+      }
+      document.body.classList.add("toolbar-open");
+    }
+
+    function cancelFsToolbarHide() {
+      if (fsHideTimer) {
+        clearTimeout(fsHideTimer);
+        fsHideTimer = null;
+      }
+    }
+
+    function scheduleFsToolbarHide() {
+      if (fsToolbarPinned) return;
+      if (fsHideTimer) clearTimeout(fsHideTimer);
+      fsHideTimer = setTimeout(() => {
+        if (!fsToolbarPinned) {
+          document.body.classList.remove("toolbar-open");
+        }
+      }, 450);
+    }
+
+    function togglePinToolbar() {
+      fsToolbarPinned = !fsToolbarPinned;
+      const btn = document.getElementById("btnPinToolbar");
+      if (btn) {
+        btn.classList.toggle("pinned", fsToolbarPinned);
+        btn.innerText = fsToolbarPinned ? "📌 Pinned" : "📌 Pin";
+      }
+      if (fsToolbarPinned) {
+        openFsToolbar();
+      }
+    }
+
     function toggleFullscreen() {
       if (!document.fullscreenElement) {
         document.documentElement.requestFullscreen().catch(() => {});
@@ -293,9 +386,15 @@
       const btn = document.getElementById("btnFullscreen");
       if (document.fullscreenElement) {
         document.body.classList.add("is-fullscreen");
+        if (fsToolbarPinned) {
+          document.body.classList.add("toolbar-open");
+        } else {
+          document.body.classList.remove("toolbar-open");
+        }
         if (btn) btn.innerText = "✕ Exit Fullscreen";
       } else {
         document.body.classList.remove("is-fullscreen");
+        document.body.classList.remove("toolbar-open");
         if (btn) btn.innerText = "⛶ Fullscreen";
       }
     });
