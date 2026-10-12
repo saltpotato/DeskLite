@@ -725,7 +725,11 @@
               ctx.drawImage(vfScratchCanvas, 0, 0, sw, sh, dx, dy, dw, dh);
               debugStats.scroll++;
               const shiftY = sy - dy;
-              recordDebugRect(dx, dy, dw, dh, "scroll", `GPU SCROLL (dy:${shiftY > 0 ? "+" : ""}${shiftY}px, 0 KB)`);
+              const shiftX = sx - dx;
+              const moveLbl = (shiftX && shiftY)
+                ? `GPU MOVE (dx:${-shiftX > 0 ? "+" : ""}${-shiftX},dy:${-shiftY > 0 ? "+" : ""}${-shiftY}px, 0 KB)`
+                : `GPU SCROLL (d${shiftY ? "y" : "x"}:${(shiftY || shiftX) > 0 ? "+" : ""}${shiftY || shiftX}px, 0 KB)`;
+              recordDebugRect(dx, dy, dw, dh, "scroll", moveLbl);
             }
           } else if (cmd === 0x04 && offset + 10 <= buf.byteLength) {
             // CMD_MARK_DIRTY

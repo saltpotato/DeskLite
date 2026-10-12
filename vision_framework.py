@@ -155,7 +155,7 @@ class StateCacheRecognizer(BaseRecognizer):
             if len(seen_rects) > 28:
                 break
             kx, ky, kw, kh = k_rect
-            if kw * kh > w * h * 4:
+            if kw * kh > w * h * 4 or kw * kh < w * h * 0.25:
                 continue
             ix1, iy1 = max(x, kx), max(y, ky)
             ix2, iy2 = min(x + w, kx + kw), min(y + h, ky + kh)
@@ -695,6 +695,221 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
         return int(changed_rows) >= 6
 
 
+class WindowMove2DRecognizer(BaseRecognizer):
+    """
+    Detects 2D diagonal/horizontal/vertical window dragging, floating dialog movement,
+    and 2D canvas/map panning without any neural network model (~0.25ms in numpy/OpenCV):
+    1. Coarse 2D translation search on 4x-downsampled 2D edge maps (`cv2.matchTemplate`).
+    2. Two-stage (+/-2px then +/-1px) exact 1-pixel refinement.
+    3. Shifts the moved window locally on the Viewer's GPU (`CMD_TRANSFORM_RECT`, 0 KB),
+       caches covered background strips before overwriting them, and restores/patches only
+       the thin L-shaped uncovered background strips + rounded window corners.
+    """
+    name = "WindowMove2DRecognizer"
+
+    def analyze(self, ctx: FrameContext):
+        if not HAS_CV2:
+            return None
+        x, y, w, h = ctx.dirty_rect
+        if w < 120 or h < 90:
+            return None
+
+        prev_roi = ctx.prev_frame[y:y + h, x:x + w]
+        curr_roi = ctx.curr_frame[y:y + h, x:x + w]
+
+        mv = self._detect_2d_translation(prev_roi, curr_roi)
+        if mv is None:
+            return None
+        mv_x, mv_y = mv
+        if abs(mv_x) + abs(mv_y) < 4:
+            return None
+
+        ov_w = w - abs(mv_x)
+        ov_h = h - abs(mv_y)
+        if ov_w < 64 or ov_h < 48:
+            return None
+
+        src_x_rel = max(0, -mv_x)
+        dst_x_rel = max(0, mv_x)
+        src_y_rel = max(0, -mv_y)
+        dst_y_rel = max(0, mv_y)
+
+        shifted = prev_roi[src_y_rel:src_y_rel + ov_h, src_x_rel:src_x_rel + ov_w]
+        target = curr_roi[dst_y_rel:dst_y_rel + ov_h, dst_x_rel:dst_x_rel + ov_w]
+
+        diff_8 = np.abs(shifted[::8, ::8, :3].astype(np.int16) - target[::8, ::8, :3].astype(np.int16)).max(axis=2)
+        inlier_ratio = float((diff_8 <= 12).mean())
+        if inlier_ratio < 0.65:
+            return None
+
+        residual_rects = Scroll2DAndSliderRecognizer._find_residual_rects(
+            shifted, target, x + dst_x_rel, y + dst_y_rel
+        )
+        if residual_rects is None:
+            return None
+
+        cmds = list(ctx.shared["pending_cmds"])
+        ctx.shared["pending_cmds"].clear()
+        ctx.shared["pending_pre_save"] = None
+        ctx.shared["pending_post_save"] = None
+
+        known = ctx.shared["known_states"]
+        dirty = ctx.shared["dirty_states"]
+
+        # 1) Save newly covered background strips into Viewer RAM cache BEFORE shifting window over them
+        if mv_y != 0:
+            sh_y = abs(mv_y)
+            cov_y = (y + h - sh_y) if mv_y > 0 else y
+            cov_h_roi = ctx.prev_frame[cov_y:cov_y + sh_y, x:x + w]
+            cov_h_hash = fast_region_hash(cov_h_roi)
+            if cov_h_hash and cov_h_hash not in known:
+                cmds.append(pack_save_state(cov_h_hash, x, cov_y, w, sh_y))
+                StateCacheRecognizer._commit_known(known, dirty, cov_h_hash, (x, cov_y, w, sh_y))
+
+        if mv_x != 0:
+            sh_x = abs(mv_x)
+            cov_x = (x + w - sh_x) if mv_x > 0 else x
+            cov_v_roi = ctx.prev_frame[y:y + h, cov_x:cov_x + sh_x]
+            cov_v_hash = fast_region_hash(cov_v_roi)
+            if cov_v_hash and cov_v_hash not in known:
+                cmds.append(pack_save_state(cov_v_hash, cov_x, y, sh_x, h))
+                StateCacheRecognizer._commit_known(known, dirty, cov_v_hash, (cov_x, y, sh_x, h))
+
+        # 2) Shift the entire window/panel locally on the Viewer GPU (0 KB image data!)
+        cmds.append(pack_transform_rect(
+            x + src_x_rel, y + src_y_rel, ov_w, ov_h,
+            x + dst_x_rel, y + dst_y_rel, ov_w, ov_h
+        ))
+
+        # 3) Restore from RAM cache or JPEG-encode the L-shaped uncovered background strips
+        strip_cache_hits = 0
+        if mv_y != 0:
+            sh_y = abs(mv_y)
+            unc_y = y if mv_y > 0 else (y + ov_h)
+            h_strip = ctx.curr_frame[unc_y:unc_y + sh_y, x:x + w]
+            s_cmds, hit = self._encode_or_restore(ctx, h_strip, x, unc_y, w, sh_y)
+            cmds.extend(s_cmds)
+            if hit:
+                strip_cache_hits += 1
+
+        if mv_x != 0:
+            sh_x = abs(mv_x)
+            unc_x = x if mv_x > 0 else (x + ov_w)
+            v_strip = ctx.curr_frame[y:y + h, unc_x:unc_x + sh_x]
+            s_cmds, hit = self._encode_or_restore(ctx, v_strip, unc_x, y, sh_x, h)
+            cmds.extend(s_cmds)
+            if hit:
+                strip_cache_hits += 1
+
+        # 4) Patch rounded window corners / shadows / stationary cursor inside overlap
+        for rx, ry, rw, rh in residual_rects:
+            res_patch = ctx.curr_frame[ry:ry + rh, rx:rx + rw]
+            cmds.append(pack_jpeg_patch(rx, ry, rw, rh, ctx.encode_jpeg(res_patch, ctx.quality)))
+
+        ctx.prev_frame[y:y + h, x:x + w] = ctx.curr_frame[y:y + h, x:x + w]
+
+        est_saved = max(1024, int(ov_w * ov_h * 0.12))
+        ctx.shared["bytes_saved"] += est_saved
+        cmds.append(pack_overlay_meta({
+            "event": "window_move",
+            "dx": int(-mv_x),
+            "dy": int(-mv_y),
+            "viewport": [int(x), int(y), int(w), int(h)],
+            "virtual_y": int(ctx.shared.get("virtual_y", 0)),
+            "saved_kb": round(ctx.shared["bytes_saved"] / 1024.0, 1)
+        }))
+        if ctx.shared.get("debug_mode", True):
+            logging.info(
+                f"[VF-DEBUG][HOST] WINDOW_MOVE_2D rect=({x},{y},{w}x{h}) "
+                f"move=({mv_x:+d},{mv_y:+d})px win=({ov_w}x{ov_h}) "
+                f"bg_cache_hits={strip_cache_hits} residuals={len(residual_rects)} "
+                f"saved_total={ctx.shared['bytes_saved'] / 1024.0:.1f}KB"
+            )
+        return cmds
+
+    @staticmethod
+    def _encode_or_restore(ctx: FrameContext, strip_arr: np.ndarray, sx: int, sy: int, sw: int, sh: int):
+        shash = fast_region_hash(strip_arr)
+        known = ctx.shared["known_states"]
+        dirty = ctx.shared["dirty_states"]
+        if shash and shash in known and shash not in dirty and known[shash][2:] == (sw, sh):
+            ctx.shared["bytes_saved"] += max(512, int(sw * sh * 0.12))
+            known.move_to_end(shash)
+            return [pack_restore_state(shash, sx, sy, sw, sh)], True
+        out = [pack_jpeg_patch(sx, sy, sw, sh, ctx.encode_jpeg(strip_arr, ctx.quality))]
+        if shash:
+            out.append(pack_save_state(shash, sx, sy, sw, sh))
+            StateCacheRecognizer._commit_known(known, dirty, shash, (sx, sy, sw, sh))
+        return out, False
+
+    @staticmethod
+    def _detect_2d_translation(prev_roi: np.ndarray, curr_roi: np.ndarray):
+        """
+        Finds a 2D translation vector (mv_x, mv_y) where `dst = src + (mv_x, mv_y)`
+        using 4x-downsampled 2D edge correlation (`cv2.matchTemplate`) followed by
+        two-stage (+/-2px then +/-1px) exact 1-pixel refinement.
+        """
+        h, w = prev_roi.shape[:2]
+        p4 = prev_roi[::4, ::4, 1].astype(np.float32)
+        c4 = curr_roi[::4, ::4, 1].astype(np.int16)
+        sh, sw = p4.shape
+        if sh < 20 or sw < 20:
+            return None
+
+        c4_f = c4.astype(np.float32)
+        p_edge = np.abs(np.diff(p4, axis=1, prepend=p4[:, :1])) + np.abs(np.diff(p4, axis=0, prepend=p4[:1, :]))
+        c_edge = np.abs(np.diff(c4_f, axis=1, prepend=c4_f[:, :1])) + np.abs(np.diff(c4_f, axis=0, prepend=c4_f[:1, :]))
+
+        my = min(sh // 4, 36)
+        mx = min(sw // 4, 36)
+        th, tw = sh - 2 * my, sw - 2 * mx
+        if th < 10 or tw < 10:
+            return None
+
+        tpl = c_edge[my:my + th, mx:mx + tw]
+        if float(tpl.std()) < 1.0:
+            return None
+
+        res = cv2.matchTemplate(p_edge, tpl, cv2.TM_CCOEFF_NORMED)
+        res[max(0, my - 1):min(res.shape[0], my + 2), max(0, mx - 1):min(res.shape[1], mx + 2)] = -1.0
+        py, px = np.unravel_index(int(np.argmax(res)), res.shape)
+        if float(res[py, px]) < 0.50:
+            return None
+
+        # Coarse movement vector (dst - src) in pixels
+        mv_x = int((mx - px) * 4)
+        mv_y = int((my - py) * 4)
+
+        # Two-stage (+/-2px then +/-1px) 1-pixel refinement on central region
+        cy1, cy2 = h // 4, h - h // 4
+        cx1, cx2 = w // 4, w - w // 4
+        c_patch = curr_roi[cy1:cy2:4, cx1:cx2:4, :3].astype(np.int16)
+
+        for step in (2, 1):
+            best_err = 1e9
+            best_dx, best_dy = mv_x, mv_y
+            for dy_off in (-step, 0, step):
+                ty = mv_y + dy_off
+                sy1, sy2 = cy1 - ty, cy2 - ty
+                if sy1 < 0 or sy2 > h:
+                    continue
+                for dx_off in (-step, 0, step):
+                    tx = mv_x + dx_off
+                    sx1, sx2 = cx1 - tx, cx2 - tx
+                    if sx1 < 0 or sx2 > w:
+                        continue
+                    p_patch = prev_roi[sy1:sy2:4, sx1:sx2:4, :3].astype(np.int16)
+                    if p_patch.shape != c_patch.shape:
+                        continue
+                    err = float(np.abs(p_patch - c_patch).mean())
+                    if err < best_err:
+                        best_err = err
+                        best_dx, best_dy = tx, ty
+            mv_x, mv_y = best_dx, best_dy
+
+        return mv_x, mv_y
+
+
 # ============================================================================
 # 2. HOST PIPELINE MANAGER (Single Entry Point for `capturer.py`)
 # ============================================================================
@@ -709,6 +924,7 @@ class VisionHostPipeline:
         self.plugins: list[BaseRecognizer] = [
             StateCacheRecognizer(),
             Scroll2DAndSliderRecognizer(),
+            WindowMove2DRecognizer(),
         ]
         self.prev_frame = None
         self.shared = {
@@ -1136,7 +1352,12 @@ class VisionViewerDecoder:
                         self.stats_scroll_blits += 1
                         shift_y = sy - dy
                         shift_x = sx - dx
-                        lbl = f"GPU SCROLL (dy:{shift_y:+d}px, 0 KB)" if shift_y else f"GPU SCROLL (dx:{shift_x:+d}px, 0 KB)"
+                        if shift_x and shift_y:
+                            lbl = f"GPU MOVE (dx:{-shift_x:+d},dy:{-shift_y:+d}px, 0 KB)"
+                        elif shift_y:
+                            lbl = f"GPU SCROLL (dy:{shift_y:+d}px, 0 KB)"
+                        else:
+                            lbl = f"GPU SCROLL (dx:{shift_x:+d}px, 0 KB)"
                         self._record_debug(dx, dy, dw, dh, "scroll", lbl)
                         if self.debug_mode:
                             log_ops.append(f"SCROLL({sx},{sy},{sw}x{sh})->({dx},{dy}) dy={shift_y:+d} dx={shift_x:+d}")
