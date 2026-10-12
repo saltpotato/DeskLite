@@ -268,8 +268,13 @@ class RemoteDesktopViewer(tk.Toplevel):
                         break
                     
                     if isinstance(message, bytes):
-                        # Store latest frame and trigger render on idle (Anti-Lag / Drop old frames)
-                        self.latest_frame = message
+                        if not hasattr(self, "frame_queue"):
+                            import collections
+                            self.frame_queue = collections.deque(maxlen=30)
+                        if message[:2] != b"DL":
+                            # Full keyframe replaces everything
+                            self.frame_queue.clear()
+                        self.frame_queue.append(message)
                         if not self.render_pending:
                             self.render_pending = True
                             self.after_idle(self._process_latest_frame)
@@ -296,12 +301,26 @@ class RemoteDesktopViewer(tk.Toplevel):
 
     def _process_latest_frame(self):
         self.render_pending = False
-        if not self.running or not self.latest_frame:
+        if not self.running or not hasattr(self, "frame_queue") or not self.frame_queue:
             return
         
-        frame_bytes = self.latest_frame
+        import struct
         try:
-            pil_img = Image.open(io.BytesIO(frame_bytes))
+            while self.frame_queue:
+                frame_bytes = self.frame_queue.popleft()
+                if frame_bytes[:2] == b"DL" and len(frame_bytes) > 10:
+                    if getattr(self, "base_image", None) is not None:
+                        dx, dy, dw, dh = struct.unpack(">HHHH", frame_bytes[2:10])
+                        patch = Image.open(io.BytesIO(frame_bytes[10:]))
+                        self.base_image.paste(patch, (dx, dy))
+                else:
+                    img = Image.open(io.BytesIO(frame_bytes))
+                    img.load()
+                    self.base_image = img
+
+            pil_img = getattr(self, "base_image", None)
+            if pil_img is None:
+                return
             
             cw = max(100, self.canvas_w)
             ch = max(100, self.canvas_h)

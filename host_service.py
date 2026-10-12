@@ -145,6 +145,7 @@ class HostService:
                         
                         if msg_type == "viewer_connected":
                             self.active_viewers += 1
+                            self.force_frame = True  # Always send a full keyframe to a new viewer
                             logging.info(f"Viewer connected! Active viewers: {self.active_viewers}")
                             self.set_status("busy", f"Remote session active ({self.active_viewers} viewer{'s' if self.active_viewers != 1 else ''})")
                             # Send initial screen info
@@ -183,7 +184,6 @@ class HostService:
                         elif msg_type == "input":
                             evt_data = data.get("data", {})
                             self.input_controller.handle_event(evt_data)
-                            self.force_frame = True
                             
                             # Auto-revive stream_task if it died unexpectedly during idle
                             if self.active_viewers > 0 and (stream_task is None or stream_task.done()):

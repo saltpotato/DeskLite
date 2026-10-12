@@ -378,7 +378,44 @@
       btnConnect.style.background = "#dc2626";
 
       ws = new WebSocket(wsUrl);
-      ws.binaryType = "blob";
+      ws.binaryType = "arraybuffer";
+
+      let frameQueue = [];
+      let isRendering = false;
+
+      async function processFrameQueue() {
+        while (frameQueue.length > 0) {
+          const buf = frameQueue.shift();
+          const u8 = new Uint8Array(buf, 0, 2);
+          // Check for 'DL' (0x44, 0x4C) Delta Bounding-Box header
+          if (u8[0] === 0x44 && u8[1] === 0x4C && buf.byteLength > 10) {
+            const view = new DataView(buf, 0, 10);
+            const dx = view.getUint16(2);
+            const dy = view.getUint16(4);
+            const dw = view.getUint16(6);
+            const dh = view.getUint16(8);
+            const blob = new Blob([new Uint8Array(buf, 10)], { type: "image/jpeg" });
+            try {
+              const bmp = await createImageBitmap(blob);
+              ctx.drawImage(bmp, dx, dy, dw, dh);
+              bmp.close();
+            } catch (e) {}
+          } else {
+            // Full Keyframe
+            const blob = new Blob([buf], { type: "image/jpeg" });
+            try {
+              const bmp = await createImageBitmap(blob);
+              if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+                canvas.width = bmp.width;
+                canvas.height = bmp.height;
+              }
+              ctx.drawImage(bmp, 0, 0);
+              bmp.close();
+            } catch (e) {}
+          }
+        }
+        isRendering = false;
+      }
 
       ws.onopen = () => {
         setStatus("Authenticating...", "yellow");
@@ -425,32 +462,21 @@
               }
             }
           } catch(e) {}
-        } else if (evt.data instanceof Blob) {
-          // Drop stale frames: always render only the freshest blob
-          latestBlob = evt.data;
-          if (!renderScheduled) {
-            renderScheduled = true;
-            requestAnimationFrame(renderFrame);
+        } else if (evt.data instanceof ArrayBuffer) {
+          if (evt.data.byteLength < 4) return;
+          const u8 = new Uint8Array(evt.data, 0, 2);
+          const isDelta = (u8[0] === 0x44 && u8[1] === 0x4C);
+          if (!isDelta) {
+            // A full keyframe replaces the entire screen, so drop any stale queued frames
+            frameQueue.length = 0;
+          }
+          frameQueue.push(evt.data);
+          if (!isRendering) {
+            isRendering = true;
+            requestAnimationFrame(processFrameQueue);
           }
         }
       };
-
-      let latestBlob = null;
-      let renderScheduled = false;
-
-      function renderFrame() {
-        renderScheduled = false;
-        if (!latestBlob) return;
-        const blob = latestBlob;
-        latestBlob = null;
-        createImageBitmap(blob).then(imgBitmap => {
-          if (canvas.width !== imgBitmap.width || canvas.height !== imgBitmap.height) {
-            canvas.width = imgBitmap.width;
-            canvas.height = imgBitmap.height;
-          }
-          ctx.drawImage(imgBitmap, 0, 0);
-        }).catch(() => {});
-      }
 
       ws.onclose = () => {
         if (shouldReconnect) {

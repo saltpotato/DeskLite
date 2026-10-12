@@ -515,9 +515,9 @@ def load_config():
         "relay_server": DEFAULT_RELAY,
         "my_id": generate_id(),
         "my_password": generate_password(),
-        "quality": 55,
-        "max_fps": 30,
-        "scale": 0.75
+        "quality": 75,
+        "max_fps": 45,
+        "scale": 1.0
     }
     if os.path.exists(CONFIG_FILE):
         try:
