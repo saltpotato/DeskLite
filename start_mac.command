@@ -7,16 +7,28 @@ if [ ! -d ".venv" ]; then
     python3 -m venv .venv
     .venv/bin/pip install --upgrade pip
     .venv/bin/pip install -r requirements.txt
-elif ! .venv/bin/python -c "import PySide6, aiortc" >/dev/null 2>&1; then
-    echo "Updating macOS dependencies (PySide6 / WebRTC)..."
+elif ! .venv/bin/python -c "import PySide6.QtWidgets, aiortc" >/dev/null 2>&1; then
+    echo "Updating macOS dependencies (PySide6-Essentials / WebRTC)..."
     .venv/bin/pip install -r requirements.txt
 fi
 
 if [ "$1" = "--build" ]; then
-    echo "Building native macOS DeskLite.app bundle..."
+    echo "Building slim native macOS DeskLite.app bundle..."
     .venv/bin/pip install pyinstaller
-    .venv/bin/pyinstaller --noconfirm --windowed --onedir --name "DeskLite" main.py
-    echo "Done! Native macOS bundle created at: dist/DeskLite.app"
+    .venv/bin/pyinstaller --noconfirm --windowed --onedir --name "DeskLite" \
+        --exclude-module tkinter \
+        --exclude-module PySide6.QtQml \
+        --exclude-module PySide6.QtQuick \
+        --exclude-module PySide6.QtQuickWidgets \
+        --exclude-module PySide6.QtNetwork \
+        --exclude-module PySide6.QtSql \
+        --exclude-module PySide6.QtSvg \
+        --exclude-module PySide6.QtOpenGL \
+        --exclude-module PySide6.QtWebEngineCore \
+        --exclude-module PySide6.QtWebEngineWidgets \
+        --exclude-module PySide6.QtMultimedia \
+        main.py
+    echo "Done! Slim native macOS bundle created at: dist/DeskLite.app"
     exit 0
 fi
 
