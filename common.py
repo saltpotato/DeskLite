@@ -393,9 +393,21 @@ def revert_to_self():
 
 
 def get_clipboard_text():
-    """Reads unicode text from Windows clipboard."""
+    """Reads unicode text from Windows, macOS, or Linux clipboard."""
+    if sys.platform == "darwin":
+        try:
+            import subprocess
+            res = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=1.5)
+            return res.stdout if res.returncode == 0 else ""
+        except Exception:
+            return ""
     if sys.platform != "win32":
-        return ""
+        try:
+            import subprocess
+            res = subprocess.run(["xclip", "-selection", "clipboard", "-o"], capture_output=True, text=True, timeout=1.5)
+            return res.stdout if res.returncode == 0 else ""
+        except Exception:
+            return ""
     try:
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
@@ -422,9 +434,23 @@ def get_clipboard_text():
         return ""
 
 def set_clipboard_text(text):
-    """Sets unicode text into Windows clipboard."""
-    if sys.platform != "win32" or text is None:
+    """Sets unicode text into Windows, macOS, or Linux clipboard."""
+    if text is None:
         return False
+    if sys.platform == "darwin":
+        try:
+            import subprocess
+            res = subprocess.run(["pbcopy"], input=text, text=True, timeout=1.5)
+            return res.returncode == 0
+        except Exception:
+            return False
+    if sys.platform != "win32":
+        try:
+            import subprocess
+            res = subprocess.run(["xclip", "-selection", "clipboard"], input=text, text=True, timeout=1.5)
+            return res.returncode == 0
+        except Exception:
+            return False
     try:
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32

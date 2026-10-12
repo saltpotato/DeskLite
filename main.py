@@ -140,21 +140,26 @@ class DeskLiteApp:
         self.combo_mode.pack(side=tk.LEFT, padx=6)
         self.combo_mode.bind("<<ComboboxSelected>>", self.on_mode_change)
 
-        # Row 2: SYSTEM & UAC Remote Control Settings
+        # Row 2: Platform / SYSTEM & UAC Remote Control Settings
+        import sys
         service_row = ttk.Frame(bottom_frame)
         service_row.pack(fill=tk.X, pady=(4, 6))
 
-        if common.is_system():
-            lbl_sys = ttk.Label(service_row, text="🛡️ SYSTEM Mode Active (UAC controllable)", foreground="#2e7d32", font=("Segoe UI", 9, "bold"))
-            lbl_sys.pack(side=tk.LEFT, padx=(0, 8))
-        else:
-            self.btn_service = ttk.Button(service_row, text="⚡ Restart as SYSTEM (for UAC)", command=self.switch_to_system)
-            self.btn_service.pack(side=tk.LEFT, padx=(0, 8))
+        if sys.platform == "win32":
+            if common.is_system():
+                lbl_sys = ttk.Label(service_row, text="🛡️ SYSTEM Mode Active (UAC controllable)", foreground="#2e7d32", font=("Segoe UI", 9, "bold"))
+                lbl_sys.pack(side=tk.LEFT, padx=(0, 8))
+            else:
+                self.btn_service = ttk.Button(service_row, text="⚡ Restart as SYSTEM (for UAC)", command=self.switch_to_system)
+                self.btn_service.pack(side=tk.LEFT, padx=(0, 8))
 
-        sec_desk_on = common.get_uac_secure_desktop()
-        uac_text = "🔓 Make UAC Visible in Stream" if sec_desk_on else "↩️ Restore UAC Screen Dimming"
-        self.btn_uac = ttk.Button(service_row, text=uac_text, command=self.toggle_uac_setting)
-        self.btn_uac.pack(side=tk.LEFT)
+            sec_desk_on = common.get_uac_secure_desktop()
+            uac_text = "🔓 Make UAC Visible in Stream" if sec_desk_on else "↩️ Restore UAC Screen Dimming"
+            self.btn_uac = ttk.Button(service_row, text=uac_text, command=self.toggle_uac_setting)
+            self.btn_uac.pack(side=tk.LEFT)
+        elif sys.platform == "darwin":
+            lbl_mac = ttk.Label(service_row, text="🍏 macOS Native Mode (CoreGraphics + Quartz Input)", foreground="#1565c0", font=("Segoe UI", 9, "bold"))
+            lbl_mac.pack(side=tk.LEFT)
 
         # Status text
         self.lbl_status = ttk.Label(bottom_frame, text="🟡 Initializing...", style="Status.TLabel")
