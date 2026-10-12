@@ -626,16 +626,22 @@ class RemoteDesktopViewer(QWidget):
 
     def closeEvent(self, event):
         self.running = False
-        if self.master_ref is not None and hasattr(self.master_ref, "active_viewers"):
-            try:
-                if self in self.master_ref.active_viewers:
-                    self.master_ref.active_viewers.remove(self)
-            except Exception:
-                pass
         if self.loop and self.loop.is_running():
             try:
                 asyncio.run_coroutine_threadsafe(self._shutdown_connections(), self.loop)
             except Exception:
                 pass
         super().closeEvent(event)
+        if self.master_ref is not None and hasattr(self.master_ref, "active_viewers"):
+            try:
+                if self in self.master_ref.active_viewers:
+                    self.master_ref.active_viewers.remove(self)
+                remaining = [v for v in self.master_ref.active_viewers if v is not self and v.isVisible()]
+                if not remaining and not self.master_ref.isVisible():
+                    if hasattr(self.master_ref, "shutdown_and_exit"):
+                        from PySide6.QtCore import QTimer
+                        QTimer.singleShot(150, self.master_ref.shutdown_and_exit)
+            except Exception:
+                pass
+
 

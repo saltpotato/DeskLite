@@ -564,13 +564,22 @@ class DeskLiteApp(QMainWindow):
         viewer = RemoteDesktopViewer(self, relay_url, partner_id, partner_pw)
         self.active_viewers.append(viewer)
 
-    def closeEvent(self, event):
+    def shutdown_and_exit(self):
         try:
             if self.host_service:
                 self.host_service.stop()
         except Exception:
             pass
         os._exit(0)
+
+    def closeEvent(self, event):
+        self.active_viewers = [v for v in self.active_viewers if v.isVisible()]
+        if self.active_viewers:
+            # Hide the Launcher/Connect window so open Viewer session windows keep running uninterrupted
+            event.ignore()
+            self.hide()
+            return
+        self.shutdown_and_exit()
 
 
 def run_as_service():
