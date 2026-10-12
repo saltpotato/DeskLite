@@ -12,7 +12,7 @@ elif ! .venv/bin/python -c "import PySide6.QtWidgets, aiortc" >/dev/null 2>&1; t
     .venv/bin/pip install -r requirements.txt
 fi
 
-if [ ! -f "desklite.icns" ]; then
+if [ ! -f "desklite.icns" ] || [ "main.py" -nt "desklite.icns" ]; then
     .venv/bin/python main.py --export-icons >/dev/null 2>&1 || true
     osascript -l JavaScript -e "ObjC.import('Cocoa'); $.NSWorkspace.sharedWorkspace.setIconForFileOptions($.NSImage.alloc.initWithContentsOfFile('$(pwd)/desklite.icns'), '$(pwd)/start_mac.command', 0);" >/dev/null 2>&1 || true
 fi

@@ -18,7 +18,7 @@ from viewer_window import RemoteDesktopViewer
 
 
 def render_app_image(size=512):
-    """Render the DeskLite 'Monitor + Feather' app icon at arbitrary resolution."""
+    """Render the DeskLite 'Monitor + Drifting Feather' app icon at arbitrary resolution."""
     img = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
     img.fill(Qt.GlobalColor.transparent)
 
@@ -36,69 +36,67 @@ def render_app_image(size=512):
     p.setBrush(QBrush(bg_grad))
     p.drawRoundedRect(rect, 102, 102)
 
-    # 2. Minimalist Desktop Monitor ("Desk")
-    mon_rect = QRectF(92, 122, 328, 216)
-    scr_grad = QLinearGradient(92, 122, 420, 338)
+    # 2. Desktop Monitor (shifted slightly upper-left, calm & grounded)
+    mon_rect = QRectF(78, 112, 292, 194)
+    scr_grad = QLinearGradient(78, 112, 370, 306)
     scr_grad.setColorAt(0.0, QColor("#09101d"))
-    scr_grad.setColorAt(1.0, QColor("#11223d"))
+    scr_grad.setColorAt(1.0, QColor("#132847"))
 
-    bezel_grad = QLinearGradient(92, 122, 92, 392)
+    bezel_grad = QLinearGradient(78, 112, 78, 360)
     bezel_grad.setColorAt(0.0, QColor("#94a3b8"))
     bezel_grad.setColorAt(1.0, QColor("#64748b"))
 
     p.setPen(QPen(QBrush(bezel_grad), 12, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
     p.setBrush(QBrush(scr_grad))
-    p.drawRoundedRect(mon_rect, 24, 24)
+    p.drawRoundedRect(mon_rect, 22, 22)
 
     # Subtle inner screen cyan rim
-    p.setPen(QPen(QColor(56, 189, 248, 65), 3))
+    p.setPen(QPen(QColor(56, 189, 248, 60), 3))
     p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawRoundedRect(mon_rect.adjusted(10, 10, -10, -10), 16, 16)
+    p.drawRoundedRect(mon_rect.adjusted(10, 10, -10, -10), 14, 14)
 
     # Monitor Stand & Base
-    p.setPen(QPen(QBrush(bezel_grad), 14, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-    p.drawLine(QPointF(256, 342), QPointF(256, 388))
-    p.drawLine(QPointF(192, 390), QPointF(320, 390))
+    p.setPen(QPen(QBrush(bezel_grad), 13, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.drawLine(QPointF(224, 310), QPointF(224, 356))
+    p.drawLine(QPointF(166, 358), QPointF(282, 358))
 
-    # 3. Elegant Feather ("Lite") floating across the screen
+    # 3. Minimalist Feather gently floating down past the bottom-right of the monitor
     p.save()
-    p.translate(264, 224)
-    p.rotate(-34)
+    p.translate(326, 290)
+    p.rotate(-20)
 
     feather = QPainterPath()
-    feather.moveTo(-115, 0)
-    feather.cubicTo(-75, -50, -15, -58, 28, -46)
-    feather.lineTo(14, -27)
-    feather.lineTo(44, -41)
-    feather.cubicTo(85, -34, 122, -12, 134, 0)
-    feather.cubicTo(122, 12, 80, 38, 24, 44)
-    feather.lineTo(8, 26)
-    feather.lineTo(2, 45)
-    feather.cubicTo(-45, 48, -85, 32, -115, 0)
+    feather.moveTo(-105, 4)
+    feather.cubicTo(-65, -36, -5, -44, 32, -36)
+    feather.lineTo(22, -20)
+    feather.lineTo(44, -33)
+    feather.cubicTo(82, -26, 114, -8, 116, 6)
+    feather.cubicTo(108, 24, 55, 40, -15, 34)
+    feather.cubicTo(-60, 30, -90, 18, -105, 4)
     feather.closeSubpath()
 
-    # Drop shadow under feather
+    # Soft drop shadow across monitor bezel & dark background
     p.save()
-    p.translate(0, 12)
+    p.translate(-6, 14)
     p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QColor(0, 0, 0, 110))
+    p.setBrush(QColor(0, 0, 0, 120))
     p.drawPath(feather)
     p.restore()
 
-    # Feather fill gradient (Deep Sky -> Cyan -> Ice White)
-    f_grad = QLinearGradient(-115, 0, 134, 0)
-    f_grad.setColorAt(0.0, QColor("#0284c7"))
-    f_grad.setColorAt(0.5, QColor("#38bdf8"))
+    # Feather fill gradient (Sky -> Cyan -> Ice White)
+    f_grad = QLinearGradient(-105, 0, 116, 0)
+    f_grad.setColorAt(0.0, QColor("#0ea5e9"))
+    f_grad.setColorAt(0.55, QColor("#38bdf8"))
     f_grad.setColorAt(1.0, QColor("#f0f9ff"))
-    p.setPen(QPen(QColor("#e0f2fe"), 3.5))
+    p.setPen(QPen(QColor("#e0f2fe"), 3))
     p.setBrush(QBrush(f_grad))
     p.drawPath(feather)
 
-    # Central quill shaft
+    # Gently curved quill shaft
     quill = QPainterPath()
-    quill.moveTo(-150, 5)
-    quill.quadTo(-20, -4, 110, 0)
-    p.setPen(QPen(QColor("#ffffff"), 6.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    quill.moveTo(-136, -6)
+    quill.cubicTo(-65, 14, 20, 14, 92, 4)
+    p.setPen(QPen(QColor("#ffffff"), 6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
     p.setBrush(Qt.BrushStyle.NoBrush)
     p.drawPath(quill)
 
