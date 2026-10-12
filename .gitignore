@@ -22,6 +22,8 @@ env/
 # Local configuration (contains personal server address and IDs)
 config.json
 build_config.py
+.env
+*.log
 
 # IDE / Editor
 .idea/

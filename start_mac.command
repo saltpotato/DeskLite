@@ -18,5 +18,5 @@ if [ "$1" = "--build" ]; then
 fi
 
 echo "Starting DeskLite (logs written to $(pwd)/desklite.log)..."
-nohup .venv/bin/python main.py >> desklite.log 2>&1 &
+nohup .venv/bin/python main.py >/dev/null 2>&1 &
 exit 0
