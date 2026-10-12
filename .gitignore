@@ -24,6 +24,8 @@ config.json
 build_config.py
 .env
 *.log
+desklite.ico
+desklite.icns
 
 # IDE / Editor
 .idea/

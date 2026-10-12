@@ -187,6 +187,8 @@ class RemoteDesktopViewer(QWidget):
 
     def __init__(self, master, relay_url, target_id, password=""):
         super().__init__(None, Qt.WindowType.Window)
+        if master is not None and not master.windowIcon().isNull():
+            self.setWindowIcon(master.windowIcon())
         self.relay_url = relay_url
         self.target_id = target_id
         self.password = password

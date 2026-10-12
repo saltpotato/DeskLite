@@ -12,10 +12,16 @@ elif ! .venv/bin/python -c "import PySide6.QtWidgets, aiortc" >/dev/null 2>&1; t
     .venv/bin/pip install -r requirements.txt
 fi
 
+if [ ! -f "desklite.icns" ]; then
+    .venv/bin/python main.py --export-icons >/dev/null 2>&1 || true
+    osascript -l JavaScript -e "ObjC.import('Cocoa'); $.NSWorkspace.sharedWorkspace.setIconForFileOptions($.NSImage.alloc.initWithContentsOfFile('$(pwd)/desklite.icns'), '$(pwd)/start_mac.command', 0);" >/dev/null 2>&1 || true
+fi
+
 if [ "$1" = "--build" ]; then
     echo "Building slim native macOS DeskLite.app bundle..."
+    .venv/bin/python main.py --export-icons
     .venv/bin/pip install pyinstaller
-    .venv/bin/pyinstaller --noconfirm --windowed --onedir --name "DeskLite" \
+    .venv/bin/pyinstaller --noconfirm --windowed --onedir --name "DeskLite" --icon desklite.icns \
         --exclude-module tkinter \
         --exclude-module PySide6.QtQml \
         --exclude-module PySide6.QtQuick \

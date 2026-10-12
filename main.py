@@ -1,7 +1,12 @@
 import os
+import struct
 import sys
 import time
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QByteArray, QBuffer, QIODevice
+from PySide6.QtGui import (
+    QImage, QPixmap, QIcon, QPainter, QPainterPath,
+    QColor, QLinearGradient, QPen, QBrush
+)
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QComboBox, QFrame, QMessageBox
@@ -10,6 +15,145 @@ from PySide6.QtWidgets import (
 import common
 from host_service import HostService
 from viewer_window import RemoteDesktopViewer
+
+
+def render_app_image(size=512):
+    """Render the DeskLite 'Monitor + Feather' app icon at arbitrary resolution."""
+    img = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(Qt.GlobalColor.transparent)
+
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    scale = size / 512.0
+    p.scale(scale, scale)
+
+    # 1. macOS Squircle Background
+    rect = QRectF(28, 28, 456, 456)
+    bg_grad = QLinearGradient(28, 28, 28, 484)
+    bg_grad.setColorAt(0.0, QColor("#1e293b"))
+    bg_grad.setColorAt(1.0, QColor("#0f172a"))
+    p.setPen(QPen(QColor("#334155"), 6))
+    p.setBrush(QBrush(bg_grad))
+    p.drawRoundedRect(rect, 102, 102)
+
+    # 2. Minimalist Desktop Monitor ("Desk")
+    mon_rect = QRectF(92, 122, 328, 216)
+    scr_grad = QLinearGradient(92, 122, 420, 338)
+    scr_grad.setColorAt(0.0, QColor("#09101d"))
+    scr_grad.setColorAt(1.0, QColor("#11223d"))
+
+    bezel_grad = QLinearGradient(92, 122, 92, 392)
+    bezel_grad.setColorAt(0.0, QColor("#94a3b8"))
+    bezel_grad.setColorAt(1.0, QColor("#64748b"))
+
+    p.setPen(QPen(QBrush(bezel_grad), 12, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    p.setBrush(QBrush(scr_grad))
+    p.drawRoundedRect(mon_rect, 24, 24)
+
+    # Subtle inner screen cyan rim
+    p.setPen(QPen(QColor(56, 189, 248, 65), 3))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRoundedRect(mon_rect.adjusted(10, 10, -10, -10), 16, 16)
+
+    # Monitor Stand & Base
+    p.setPen(QPen(QBrush(bezel_grad), 14, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.drawLine(QPointF(256, 342), QPointF(256, 388))
+    p.drawLine(QPointF(192, 390), QPointF(320, 390))
+
+    # 3. Elegant Feather ("Lite") floating across the screen
+    p.save()
+    p.translate(264, 224)
+    p.rotate(-34)
+
+    feather = QPainterPath()
+    feather.moveTo(-115, 0)
+    feather.cubicTo(-75, -50, -15, -58, 28, -46)
+    feather.lineTo(14, -27)
+    feather.lineTo(44, -41)
+    feather.cubicTo(85, -34, 122, -12, 134, 0)
+    feather.cubicTo(122, 12, 80, 38, 24, 44)
+    feather.lineTo(8, 26)
+    feather.lineTo(2, 45)
+    feather.cubicTo(-45, 48, -85, 32, -115, 0)
+    feather.closeSubpath()
+
+    # Drop shadow under feather
+    p.save()
+    p.translate(0, 12)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(0, 0, 0, 110))
+    p.drawPath(feather)
+    p.restore()
+
+    # Feather fill gradient (Deep Sky -> Cyan -> Ice White)
+    f_grad = QLinearGradient(-115, 0, 134, 0)
+    f_grad.setColorAt(0.0, QColor("#0284c7"))
+    f_grad.setColorAt(0.5, QColor("#38bdf8"))
+    f_grad.setColorAt(1.0, QColor("#f0f9ff"))
+    p.setPen(QPen(QColor("#e0f2fe"), 3.5))
+    p.setBrush(QBrush(f_grad))
+    p.drawPath(feather)
+
+    # Central quill shaft
+    quill = QPainterPath()
+    quill.moveTo(-150, 5)
+    quill.quadTo(-20, -4, 110, 0)
+    p.setPen(QPen(QColor("#ffffff"), 6.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawPath(quill)
+
+    p.restore()
+    p.end()
+    return img
+
+
+def create_app_icon():
+    """Build a multi-resolution QIcon for macOS Dock & Windows Taskbar/Titlebar."""
+    icon = QIcon()
+    for sz in (16, 24, 32, 48, 64, 128, 256, 512):
+        icon.addPixmap(QPixmap.fromImage(render_app_image(sz)))
+    return icon
+
+
+def create_app_pixmap(logical_size=26):
+    """Create a Retina @2x QPixmap for inline UI headers."""
+    px = QPixmap.fromImage(render_app_image(logical_size * 2))
+    px.setDevicePixelRatio(2.0)
+    return px
+
+
+def _image_to_png_bytes(img):
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    img.save(buf, "PNG")
+    return bytes(ba)
+
+
+def export_icon_files(ico_path="desklite.ico", icns_path="desklite.icns"):
+    """Export native Windows .ico and macOS .icns files without external dependencies."""
+    # 1. Windows .ico (multi-size PNG-in-ICO container)
+    ico_sizes = (16, 32, 48, 64, 256)
+    png_blobs = [(_sz, _image_to_png_bytes(render_app_image(_sz))) for _sz in ico_sizes]
+    header = struct.pack("<HHH", 0, 1, len(png_blobs))
+    offset = 6 + 16 * len(png_blobs)
+    entries = []
+    for sz, blob in png_blobs:
+        dim = 0 if sz >= 256 else sz
+        entries.append(struct.pack("<BBBBHHII", dim, dim, 0, 0, 1, 32, len(blob), offset))
+        offset += len(blob)
+    with open(ico_path, "wb") as f:
+        f.write(header + b"".join(entries) + b"".join(b for _, b in png_blobs))
+
+    # 2. macOS .icns (Apple ICNS container with ic07=128, ic08=256, ic09=512 PNG chunks)
+    icns_Spec = ((b"ic07", 128), (b"ic08", 256), (b"ic09", 512))
+    chunks = []
+    for tag, sz in icns_Spec:
+        blob = _image_to_png_bytes(render_app_image(sz))
+        chunks.append(tag + struct.pack(">I", 8 + len(blob)) + blob)
+    body = b"".join(chunks)
+    with open(icns_path, "wb") as f:
+        f.write(b"icns" + struct.pack(">I", 8 + len(body)) + body)
 
 
 class DeskLiteApp(QMainWindow):
@@ -87,16 +231,23 @@ class DeskLiteApp(QMainWindow):
         root_layout.setContentsMargins(20, 16, 20, 14)
         root_layout.setSpacing(12)
 
-        # Header
-        header_text = "⚡ DeskLite"
+        # Header with custom Monitor + Feather icon
+        header_row = QHBoxLayout()
+        header_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header_row.setSpacing(8)
+        icon_lbl = QLabel()
+        icon_lbl.setPixmap(create_app_pixmap(28))
+        header_row.addWidget(icon_lbl)
+
+        header_text = "DeskLite"
         if common.is_system():
             header_text += " [SYSTEM]"
         elif common.is_admin() and sys.platform == "win32":
             header_text += " [Administrator]"
         header = QLabel(header_text)
-        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")
-        root_layout.addWidget(header)
+        header_row.addWidget(header)
+        root_layout.addLayout(header_row)
 
         # Two-column card container
         cards_row = QHBoxLayout()
@@ -422,7 +573,11 @@ def run_as_service():
 
 
 if __name__ == "__main__":
-    if "--service" in sys.argv:
+    if "--export-icons" in sys.argv:
+        _app = QApplication(sys.argv)
+        export_icon_files()
+        sys.exit(0)
+    elif "--service" in sys.argv:
         run_as_service()
     else:
         # 0. If a DeskLite window is already running, focus it immediately and exit
@@ -447,7 +602,21 @@ if __name__ == "__main__":
         if not cfg.get("uac_secure_desktop", False):
             common.set_uac_secure_desktop(False)
 
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DeskLite.RemoteDesktop.1")
+            except Exception:
+                pass
+
         app = QApplication(sys.argv)
+        app.setApplicationName("DeskLite")
+        app.setApplicationDisplayName("DeskLite")
+        app_icon = create_app_icon()
+        app.setWindowIcon(app_icon)
+
         window = DeskLiteApp()
+        window.setWindowIcon(app_icon)
         window.show()
         sys.exit(app.exec())
+

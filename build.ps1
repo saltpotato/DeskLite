@@ -12,7 +12,8 @@ Write-Host "Baking ID server into EXE: $relay"
 
 $timestamp = Get-Date -Format "HHmmss"
 $outDir = "dist_$timestamp"
-pyinstaller --noconfirm --onefile --windowed --name "DeskLite" --hidden-import build_config --uac-admin `
+python main.py --export-icons
+pyinstaller --noconfirm --onefile --windowed --name "DeskLite" --icon desklite.ico --hidden-import build_config --uac-admin `
     --exclude-module tkinter `
     --exclude-module PySide6.QtQml `
     --exclude-module PySide6.QtQuick `
