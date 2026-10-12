@@ -1,4 +1,5 @@
 import io
+import logging
 import time
 import mss
 import sys
@@ -12,6 +13,12 @@ try:
 except ImportError:
     HAS_CV2 = False
 
+try:
+    import dxcam
+    HAS_DXCAM = True
+except ImportError:
+    HAS_DXCAM = False
+
 from PIL import Image
 
 class ScreenCapturer:
@@ -22,10 +29,47 @@ class ScreenCapturer:
         self.monitor_index = monitor_index
 
         self.sct = mss.MSS()
+        self.dx_cam = None
+        self.last_dx_init_try = 0.0
+
         self.last_grid = None
-        self.last_send_time = 0
+        self.last_send_time = 0.0
 
         self._update_monitor()
+
+    def _init_dxcam(self):
+        """Lazily initializes GPU-direct DXGI Desktop Duplication on the active capture thread."""
+        if not HAS_DXCAM or sys.platform != "win32":
+            return
+        now = time.time()
+        if now - self.last_dx_init_try < 5.0:
+            return
+        self.last_dx_init_try = now
+        try:
+            if self.dx_cam is not None:
+                try:
+                    self.dx_cam.release()
+                except Exception:
+                    pass
+                self.dx_cam = None
+            out_idx = max(0, self.monitor_index - 1)
+            self.dx_cam = dxcam.create(output_idx=out_idx, output_color="BGRA")
+            logging.info("DXGI Desktop Duplication (dxcam) GPU capture active.")
+        except Exception as e:
+            logging.debug(f"DXGI init fallback to GDI: {e}")
+            self.dx_cam = None
+
+    def _release_capture_resources(self):
+        try:
+            self.sct.close()
+        except Exception:
+            pass
+        if self.dx_cam is not None:
+            try:
+                self.dx_cam.release()
+            except Exception:
+                pass
+            self.dx_cam = None
 
     def _update_monitor(self):
         try:
@@ -60,15 +104,37 @@ class ScreenCapturer:
                 return None
         return None
 
-    def capture_frame(self, draw_cursor=False, force=False):
-        """Captures a live frame and returns JPEG bytes.
-        Uses a 0.16ms uint32 strided grid check to detect even subtle window focus changes
-        while sending 0 bytes when the screen is completely static."""
+    def _grab_frame_array(self, force=False, now=0.0):
+        """Grabs a live (H, W, 4) BGRA frame using DXGI Desktop Duplication API (dxcam)
+        with automatic GDI (mss) fallback for UAC prompts and forced post-click updates."""
+        if ensure_desktop_access(before_switch_callback=self._release_capture_resources):
+            self.sct = mss.MSS()
+            self._update_monitor()
+            self.last_grid = None
+            self.last_dx_init_try = 0.0
+
+        # 1. Primary path: GPU-direct DXGI Desktop Duplication API (dxcam)
+        if HAS_DXCAM and HAS_CV2:
+            if self.dx_cam is None and (now - self.last_dx_init_try >= 5.0):
+                self._init_dxcam()
+            if self.dx_cam is not None:
+                try:
+                    # Zero-copy GPU grab: returns new frame if GPU surface updated, else None in ~0.05ms
+                    gpu_frame = self.dx_cam.grab(copy=False, new_frame_only=True)
+                    if gpu_frame is not None:
+                        return gpu_frame, True
+                    # If no new GPU frame is flagged and we don't need a forced/heartbeat frame, skip immediately!
+                    if not force and self.last_grid is not None and (now - self.last_send_time < 1.5):
+                        return None, False
+                except Exception:
+                    try:
+                        self.dx_cam.release()
+                    except Exception:
+                        pass
+                    self.dx_cam = None
+
+        # 2. Fallback / Force-verification path: Win32 GDI BitBlt (mss)
         try:
-            if ensure_desktop_access(before_switch_callback=lambda: self.sct.close()):
-                self.sct = mss.MSS()
-                self._update_monitor()
-                self.last_grid = None
             raw = self.sct.grab(self.monitor)
         except Exception:
             try:
@@ -78,19 +144,29 @@ class ScreenCapturer:
                 self.last_grid = None
                 raw = self.sct.grab(self.monitor)
             except Exception:
-                return None
-
-        now = time.time()
+                return None, False
 
         if HAS_CV2:
+            arr = np.frombuffer(raw.raw, dtype=np.uint8).reshape((raw.height, raw.width, 4))
+            return arr, False
+        return raw, False
+
+    def capture_frame(self, draw_cursor=False, force=False):
+        """Captures a live frame via DXGI GPU Duplication (with GDI fallback) and encodes to JPEG."""
+        now = time.time()
+        grabbed, from_dxgi_update = self._grab_frame_array(force=force, now=now)
+        if grabbed is None:
+            return None
+
+        if HAS_CV2 and isinstance(grabbed, np.ndarray):
             try:
-                img_np = np.frombuffer(raw.raw, dtype=np.uint8).reshape((raw.height, raw.width, 4))
+                img_np = grabbed
+                fh, fw = img_np.shape[:2]
 
                 # Ultra-fast 0.16ms uint32 strided grid view (::4, ::4)
-                # Detects any window activation, focus border, or text change immediately
-                grid = img_np.view(np.uint32).reshape(raw.height, raw.width)[::4, ::4]
+                grid = img_np.view(np.uint32).reshape(fh, fw)[::4, ::4]
 
-                if not force and self.last_grid is not None and self.last_grid.shape == grid.shape:
+                if not force and not from_dxgi_update and self.last_grid is not None and self.last_grid.shape == grid.shape:
                     if not np.any(grid != self.last_grid) and (now - self.last_send_time < 1.5):
                         return None
 
@@ -113,7 +189,7 @@ class ScreenCapturer:
         # Fallback to PIL
         try:
             self.last_send_time = now
-            img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+            img = Image.frombytes("RGB", grabbed.size, grabbed.bgra, "raw", "BGRX")
 
             if self.scale != 1.0 and 0.1 <= self.scale < 1.0:
                 new_w = max(100, int(self.width * self.scale))
@@ -125,5 +201,6 @@ class ScreenCapturer:
             return buf.getvalue()
         except Exception:
             return None
+
 
 
