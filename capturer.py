@@ -28,7 +28,17 @@ class ScreenCapturer:
         self.scale = scale
         self.monitor_index = monitor_index
 
-        self.sct = mss.MSS()
+        self.width = 1920
+        self.height = 1080
+        self.left = 0
+        self.top = 0
+        self.monitor = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+
+        try:
+            self.sct = mss.MSS()
+        except Exception as e:
+            logging.error(f"mss init error: {e}")
+            self.sct = None
         self.dx_cam = None
         self.last_dx_init_try = 0.0
 

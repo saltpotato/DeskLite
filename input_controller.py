@@ -1,49 +1,60 @@
 import sys
 import ctypes
-import pynput
-from pynput.mouse import Button, Controller as MouseController
-from pynput.keyboard import Key, Controller as KeyboardController
+import logging
 from common import ensure_desktop_access, is_admin
 
-SPECIAL_KEYS = {
-    "enter": Key.enter,
-    "return": Key.enter,
-    "backspace": Key.backspace,
-    "tab": Key.tab,
-    "space": Key.space,
-    "shift": Key.shift,
-    "ctrl": Key.ctrl,
-    "control": Key.ctrl,
-    "alt": Key.alt,
-    "esc": Key.esc,
-    "escape": Key.esc,
-    "delete": Key.delete,
-    "del": Key.delete,
-    "home": Key.home,
-    "end": Key.end,
-    "page_up": Key.page_up,
-    "pageup": Key.page_up,
-    "page_down": Key.page_down,
-    "pagedown": Key.page_down,
-    "left": Key.left,
-    "right": Key.right,
-    "up": Key.up,
-    "down": Key.down,
-    "caps_lock": Key.caps_lock,
-    "cmd": Key.cmd,
-    "win": Key.cmd,
-    "super": Key.cmd,
-    "meta": Key.cmd,
-    "f1": Key.f1, "f2": Key.f2, "f3": Key.f3, "f4": Key.f4,
-    "f5": Key.f5, "f6": Key.f6, "f7": Key.f7, "f8": Key.f8,
-    "f9": Key.f9, "f10": Key.f10, "f11": Key.f11, "f12": Key.f12
-}
+try:
+    import pynput
+    from pynput.mouse import Button, Controller as MouseController
+    from pynput.keyboard import Key, Controller as KeyboardController
+    HAS_PYNPUT = True
+except Exception as e:
+    logging.error(f"Failed to import pynput: {e}")
+    HAS_PYNPUT = False
+    Button = None
+    Key = None
 
-BUTTONS = {
-    "left": Button.left,
-    "right": Button.right,
-    "middle": Button.middle
-}
+SPECIAL_KEYS = {}
+BUTTONS = {}
+if HAS_PYNPUT:
+    SPECIAL_KEYS = {
+        "enter": Key.enter,
+        "return": Key.enter,
+        "backspace": Key.backspace,
+        "tab": Key.tab,
+        "space": Key.space,
+        "shift": Key.shift,
+        "ctrl": Key.ctrl,
+        "control": Key.ctrl,
+        "alt": Key.alt,
+        "esc": Key.esc,
+        "escape": Key.esc,
+        "delete": Key.delete,
+        "del": Key.delete,
+        "home": Key.home,
+        "end": Key.end,
+        "page_up": Key.page_up,
+        "pageup": Key.page_up,
+        "page_down": Key.page_down,
+        "pagedown": Key.page_down,
+        "left": Key.left,
+        "right": Key.right,
+        "up": Key.up,
+        "down": Key.down,
+        "caps_lock": Key.caps_lock,
+        "cmd": Key.cmd,
+        "win": Key.cmd,
+        "super": Key.cmd,
+        "meta": Key.cmd,
+        "f1": Key.f1, "f2": Key.f2, "f3": Key.f3, "f4": Key.f4,
+        "f5": Key.f5, "f6": Key.f6, "f7": Key.f7, "f8": Key.f8,
+        "f9": Key.f9, "f10": Key.f10, "f11": Key.f11, "f12": Key.f12
+    }
+    BUTTONS = {
+        "left": Button.left,
+        "right": Button.right,
+        "middle": Button.middle
+    }
 
 class InputController:
     def __init__(self, screen_width, screen_height, screen_left=0, screen_top=0):
@@ -52,11 +63,22 @@ class InputController:
         self.height = screen_height
         self.left = screen_left
         self.top = screen_top
-        self.mouse = MouseController()
-        self.keyboard = KeyboardController()
+        self.mouse = None
+        self.keyboard = None
+        if HAS_PYNPUT:
+            try:
+                self.mouse = MouseController()
+            except Exception as e:
+                logging.warning(f"MouseController init warning: {e}")
+            try:
+                self.keyboard = KeyboardController()
+            except Exception as e:
+                logging.warning(f"KeyboardController init warning: {e}")
 
     def handle_event(self, event):
         ensure_desktop_access()
+        if sys.platform != "win32" and (self.mouse is None or self.keyboard is None):
+            return
         evt_type = event.get("event")
 
         if evt_type == "mouse_move":
