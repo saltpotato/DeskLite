@@ -1,174 +1,264 @@
-import tkinter as tk
-from tkinter import ttk, messagebox
+import os
+import sys
+import time
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QLineEdit, QComboBox, QFrame, QMessageBox
+)
+
 import common
 from host_service import HostService
 from viewer_window import RemoteDesktopViewer
 
-class DeskLiteApp:
-    def __init__(self, root):
-        self.root = root
+
+class DeskLiteApp(QMainWindow):
+    status_sig = Signal(str, str)
+
+    def __init__(self):
+        super().__init__()
         is_sys = common.is_system()
         is_adm = common.is_admin()
-        role_tag = "[SYSTEM]" if is_sys else ("[Administrator]" if is_adm else "")
-        self.root.title(f"DeskLite {role_tag} - Remote Desktop".replace("  ", " "))
-        self.root.resizable(False, False)
-        
+        role_tag = "[SYSTEM]" if is_sys else ("[Administrator]" if is_adm and sys.platform == "win32" else "")
+        self.setWindowTitle(f"DeskLite {role_tag} - Remote Desktop".replace("  ", " "))
+        self.setFixedSize(640, 410)
+
         self.config = common.load_config()
         self.host_service = None
+        self.active_viewers = []
 
-        self._apply_styles()
+        self.status_sig.connect(self._apply_host_status)
         self._build_ui()
-        
-        # Start Host Service
         self.start_host_service()
-        
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-
-    def _apply_styles(self):
-        style = ttk.Style()
-        style.theme_use("clam")
-        
-        # Custom colors
-        self.bg_color = "#f4f6f9"
-        self.card_bg = "#ffffff"
-        self.primary_color = "#1976d2"
-        self.text_color = "#2c3e50"
-        
-        self.root.configure(bg=self.bg_color)
-        
-        style.configure("TLabel", background=self.bg_color, foreground=self.text_color, font=("Segoe UI", 10))
-        style.configure("Card.TFrame", background=self.card_bg, relief="solid", borderwidth=1)
-        style.configure("CardLabel.TLabel", background=self.card_bg, foreground=self.text_color, font=("Segoe UI", 10))
-        style.configure("Title.TLabel", background=self.card_bg, foreground="#1565c0", font=("Segoe UI", 12, "bold"))
-        style.configure("Header.TLabel", background=self.bg_color, foreground="#0d47a1", font=("Segoe UI", 15, "bold"))
-        style.configure("ID.TLabel", background=self.card_bg, foreground="#2e7d32", font=("Consolas", 18, "bold"))
-        style.configure("PW.TLabel", background=self.card_bg, foreground="#d84315", font=("Consolas", 14, "bold"))
-        style.configure("Status.TLabel", background=self.bg_color, font=("Segoe UI", 9))
-        
-        style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"), background=self.primary_color, foreground="white")
-        style.map("Primary.TButton", background=[("active", "#1565c0")])
 
     def _build_ui(self):
-        # Header banner
+        central = QWidget(self)
+        self.setCentralWidget(central)
+        central.setStyleSheet("""
+            QWidget {
+                background-color: #f4f6f9;
+                color: #1e293b;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                font-size: 13px;
+            }
+            QFrame#Card {
+                background-color: #ffffff;
+                border: 1px solid #cbd5e1;
+                border-radius: 8px;
+            }
+            QFrame#Card QLabel {
+                background-color: transparent;
+            }
+            QLineEdit, QComboBox {
+                background-color: #ffffff;
+                border: 1px solid #cbd5e1;
+                border-radius: 5px;
+                padding: 5px 8px;
+                font-size: 13px;
+            }
+            QLineEdit:focus, QComboBox:focus {
+                border: 1px solid #2563eb;
+            }
+            QPushButton {
+                background-color: #e2e8f0;
+                color: #1e293b;
+                border: 1px solid #cbd5e1;
+                border-radius: 5px;
+                padding: 5px 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #cbd5e1;
+            }
+            QPushButton#PrimaryBtn {
+                background-color: #2563eb;
+                color: #ffffff;
+                border: none;
+                padding: 8px 16px;
+                font-size: 14px;
+                font-weight: 700;
+            }
+            QPushButton#PrimaryBtn:hover {
+                background-color: #1d4ed8;
+            }
+        """)
+
+        root_layout = QVBoxLayout(central)
+        root_layout.setContentsMargins(20, 16, 20, 14)
+        root_layout.setSpacing(12)
+
+        # Header
         header_text = "⚡ DeskLite"
         if common.is_system():
             header_text += " [SYSTEM]"
-        elif common.is_admin():
+        elif common.is_admin() and sys.platform == "win32":
             header_text += " [Administrator]"
-        header = ttk.Label(self.root, text=header_text, style="Header.TLabel")
-        header.pack(pady=(16, 12))
+        header = QLabel(header_text)
+        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")
+        root_layout.addWidget(header)
 
-        # Main 2-column container
-        columns = ttk.Frame(self.root)
-        columns.pack(fill=tk.BOTH, expand=True, padx=20)
-        
-        # LEFT CARD: This PC (Host)
-        left_card = ttk.Frame(columns, style="Card.TFrame", padding=16)
-        left_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
-        
-        ttk.Label(left_card, text="This PC (Share)", style="Title.TLabel").pack(anchor=tk.W, pady=(0, 12))
-        
-        ttk.Label(left_card, text="Your ID:", style="CardLabel.TLabel").pack(anchor=tk.W)
-        self.lbl_id = ttk.Label(left_card, text=self.config.get("my_id", "--- ---"), style="ID.TLabel")
-        self.lbl_id.pack(anchor=tk.W, pady=(2, 8))
-        
-        id_btn_frame = ttk.Frame(left_card, style="Card.TFrame")
-        id_btn_frame.pack(fill=tk.X, pady=(0, 12))
-        btn_copy_id = ttk.Button(id_btn_frame, text="📋 Copy ID", command=self.copy_id)
-        btn_copy_id.pack(side=tk.LEFT)
-        btn_new_id = ttk.Button(id_btn_frame, text="🔄 New", command=self.new_id)
-        btn_new_id.pack(side=tk.LEFT, padx=6)
+        # Two-column card container
+        cards_row = QHBoxLayout()
+        cards_row.setSpacing(14)
 
-        ttk.Label(left_card, text="One-Time Password:", style="CardLabel.TLabel").pack(anchor=tk.W)
-        self.lbl_pw = ttk.Label(left_card, text=self.config.get("my_password", "------"), style="PW.TLabel")
-        self.lbl_pw.pack(anchor=tk.W, pady=(2, 8))
+        # LEFT CARD: Share This PC (Host)
+        left_card = QFrame()
+        left_card.setObjectName("Card")
+        left_layout = QVBoxLayout(left_card)
+        left_layout.setContentsMargins(16, 14, 16, 14)
+        left_layout.setSpacing(6)
 
-        btn_new_pw = ttk.Button(left_card, text="🔄 New Password", command=self.new_password)
-        btn_new_pw.pack(anchor=tk.W)
+        lbl_host_title = QLabel("Share This PC")
+        lbl_host_title.setStyleSheet("font-size: 15px; font-weight: 700; color: #1d4ed8;")
+        left_layout.addWidget(lbl_host_title)
+
+        lbl_id_cap = QLabel("Your ID:")
+        lbl_id_cap.setStyleSheet("color: #64748b; font-size: 12px;")
+        left_layout.addWidget(lbl_id_cap)
+
+        self.lbl_id = QLabel(self.config.get("my_id", "---"))
+        self.lbl_id.setStyleSheet("font-family: Consolas, Menlo, monospace; font-size: 22px; font-weight: 800; color: #15803d;")
+        left_layout.addWidget(self.lbl_id)
+
+        id_btn_row = QHBoxLayout()
+        btn_copy_id = QPushButton("📋 Copy")
+        btn_copy_id.clicked.connect(self.copy_id)
+        btn_new_id = QPushButton("🔄 New")
+        btn_new_id.clicked.connect(self.new_id)
+        id_btn_row.addWidget(btn_copy_id)
+        id_btn_row.addWidget(btn_new_id)
+        id_btn_row.addStretch(1)
+        left_layout.addLayout(id_btn_row)
+
+        left_layout.addSpacing(6)
+
+        lbl_pw_cap = QLabel("One-Time Password:")
+        lbl_pw_cap.setStyleSheet("color: #64748b; font-size: 12px;")
+        left_layout.addWidget(lbl_pw_cap)
+
+        pw_row = QHBoxLayout()
+        self.lbl_pw = QLabel(self.config.get("my_password", "---"))
+        self.lbl_pw.setStyleSheet("font-family: Consolas, Menlo, monospace; font-size: 17px; font-weight: 700; color: #c2410c;")
+        btn_new_pw = QPushButton("🔄 New")
+        btn_new_pw.clicked.connect(self.new_password)
+        pw_row.addWidget(self.lbl_pw)
+        pw_row.addSpacing(8)
+        pw_row.addWidget(btn_new_pw)
+        pw_row.addStretch(1)
+        left_layout.addLayout(pw_row)
+        left_layout.addStretch(1)
+
+        cards_row.addWidget(left_card, 1)
 
         # RIGHT CARD: Control Remote PC (Viewer)
-        right_card = ttk.Frame(columns, style="Card.TFrame", padding=16)
-        right_card.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(10, 0))
-        
-        ttk.Label(right_card, text="Control Remote PC", style="Title.TLabel").pack(anchor=tk.W, pady=(0, 12))
-        
-        ttk.Label(right_card, text="Enter Partner ID:", style="CardLabel.TLabel").pack(anchor=tk.W, pady=(0, 4))
-        recent_ids = [p["id"] for p in self.config.get("recent_partners", [])]
-        self.entry_partner_id = ttk.Combobox(right_card, font=("Consolas", 14), width=17, values=recent_ids)
-        self.entry_partner_id.pack(anchor=tk.W, pady=(0, 12))
-        self.entry_partner_id.bind("<Return>", lambda e: self.connect_partner())
-        self.entry_partner_id.bind("<<ComboboxSelected>>", self.on_partner_selected)
+        right_card = QFrame()
+        right_card.setObjectName("Card")
+        right_layout = QVBoxLayout(right_card)
+        right_layout.setContentsMargins(16, 14, 16, 14)
+        right_layout.setSpacing(6)
 
-        ttk.Label(right_card, text="Partner Password (if set):", style="CardLabel.TLabel").pack(anchor=tk.W, pady=(0, 4))
-        self.entry_partner_pw = ttk.Entry(right_card, font=("Segoe UI", 11), width=18, show="*")
-        self.entry_partner_pw.pack(anchor=tk.W, pady=(0, 16))
-        self.entry_partner_pw.bind("<Return>", lambda e: self.connect_partner())
+        lbl_view_title = QLabel("Control Remote PC")
+        lbl_view_title.setStyleSheet("font-size: 15px; font-weight: 700; color: #1d4ed8;")
+        right_layout.addWidget(lbl_view_title)
 
-        # Prefill last partner
+        lbl_pid_cap = QLabel("Partner ID:")
+        lbl_pid_cap.setStyleSheet("color: #64748b; font-size: 12px;")
+        right_layout.addWidget(lbl_pid_cap)
+
+        self.entry_partner_id = QComboBox()
+        self.entry_partner_id.setEditable(True)
+        recent_ids = [p["id"] for p in self.config.get("recent_partners", []) if "id" in p]
+        self.entry_partner_id.addItems(recent_ids)
+        self.entry_partner_id.currentTextChanged.connect(self.on_partner_selected)
+        right_layout.addWidget(self.entry_partner_id)
+
+        right_layout.addSpacing(4)
+
+        lbl_ppw_cap = QLabel("Partner Password (if set):")
+        lbl_ppw_cap.setStyleSheet("color: #64748b; font-size: 12px;")
+        right_layout.addWidget(lbl_ppw_cap)
+
+        self.entry_partner_pw = QLineEdit()
+        self.entry_partner_pw.setEchoMode(QLineEdit.EchoMode.Password)
+        self.entry_partner_pw.returnPressed.connect(self.connect_partner)
+        right_layout.addWidget(self.entry_partner_pw)
+
         if recent_ids:
-            self.entry_partner_id.current(0)
+            self.entry_partner_id.setCurrentIndex(0)
             self.on_partner_selected()
 
-        btn_connect = ttk.Button(right_card, text="🚀 Connect", style="Primary.TButton", command=self.connect_partner)
-        btn_connect.pack(anchor=tk.W, ipady=4, fill=tk.X)
+        right_layout.addStretch(1)
 
-        # BOTTOM: Server, Service & Status
-        bottom_frame = ttk.Frame(self.root, padding=(20, 10))
-        bottom_frame.pack(fill=tk.X, side=tk.BOTTOM)
+        btn_connect = QPushButton("🚀 Connect")
+        btn_connect.setObjectName("PrimaryBtn")
+        btn_connect.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_connect.clicked.connect(self.connect_partner)
+        right_layout.addWidget(btn_connect)
 
-        # Row 1: Server URL and Quality Mode
-        server_row = ttk.Frame(bottom_frame)
-        server_row.pack(fill=tk.X, pady=(0, 6))
+        cards_row.addWidget(right_card, 1)
+        root_layout.addLayout(cards_row, 1)
 
-        ttk.Label(server_row, text="ID Server:").pack(side=tk.LEFT)
-        self.entry_server = ttk.Entry(server_row, width=24)
-        self.entry_server.insert(0, self.config.get("relay_server", "ws://localhost:8765"))
-        self.entry_server.pack(side=tk.LEFT, padx=6)
+        # BOTTOM ROW 1: ID Server & Profile
+        server_row = QHBoxLayout()
+        server_row.setSpacing(6)
+        server_row.addWidget(QLabel("ID Server:"))
+        self.entry_server = QLineEdit(self.config.get("relay_server", "ws://localhost:8765"))
+        server_row.addWidget(self.entry_server, 1)
 
-        btn_save_server = ttk.Button(server_row, text="Save", command=self.save_server)
-        btn_save_server.pack(side=tk.LEFT, padx=(0, 12))
+        btn_save_server = QPushButton("Save")
+        btn_save_server.clicked.connect(self.save_server)
+        server_row.addWidget(btn_save_server)
 
-        ttk.Label(server_row, text="Profile:").pack(side=tk.LEFT)
-        self.combo_mode = ttk.Combobox(server_row, values=["🚀 Fast", "⚖️ Balanced", "💎 HQ"], state="readonly", width=12)
+        server_row.addSpacing(8)
+        server_row.addWidget(QLabel("Profile:"))
+        self.combo_mode = QComboBox()
+        self.combo_mode.addItems(["🚀 Fast", "⚖️ Balanced", "💎 HQ"])
         curr_q = self.config.get("quality", 75)
         if curr_q <= 65:
-            self.combo_mode.current(0)
+            self.combo_mode.setCurrentIndex(0)
         elif curr_q >= 85:
-            self.combo_mode.current(2)
+            self.combo_mode.setCurrentIndex(2)
         else:
-            self.combo_mode.current(1)
-        self.combo_mode.pack(side=tk.LEFT, padx=6)
-        self.combo_mode.bind("<<ComboboxSelected>>", self.on_mode_change)
+            self.combo_mode.setCurrentIndex(1)
+        self.combo_mode.currentIndexChanged.connect(self.on_mode_change)
+        server_row.addWidget(self.combo_mode)
+        root_layout.addLayout(server_row)
 
-        # Row 2: Platform / SYSTEM & UAC Remote Control Settings
-        import sys
-        service_row = ttk.Frame(bottom_frame)
-        service_row.pack(fill=tk.X, pady=(4, 6))
-
+        # BOTTOM ROW 2: Platform / SYSTEM & UAC Controls
+        service_row = QHBoxLayout()
+        service_row.setSpacing(8)
         if sys.platform == "win32":
             if common.is_system():
-                lbl_sys = ttk.Label(service_row, text="🛡️ SYSTEM Mode Active (UAC controllable)", foreground="#2e7d32", font=("Segoe UI", 9, "bold"))
-                lbl_sys.pack(side=tk.LEFT, padx=(0, 8))
+                lbl_sys = QLabel("🛡️ SYSTEM Mode Active (UAC controllable)")
+                lbl_sys.setStyleSheet("color: #15803d; font-weight: 700; font-size: 12px;")
+                service_row.addWidget(lbl_sys)
             else:
-                self.btn_service = ttk.Button(service_row, text="⚡ Restart as SYSTEM (for UAC)", command=self.switch_to_system)
-                self.btn_service.pack(side=tk.LEFT, padx=(0, 8))
+                self.btn_service = QPushButton("⚡ Restart as SYSTEM (for UAC)")
+                self.btn_service.clicked.connect(self.switch_to_system)
+                service_row.addWidget(self.btn_service)
 
             sec_desk_on = common.get_uac_secure_desktop()
             uac_text = "🔓 Make UAC Visible in Stream" if sec_desk_on else "↩️ Restore UAC Screen Dimming"
-            self.btn_uac = ttk.Button(service_row, text=uac_text, command=self.toggle_uac_setting)
-            self.btn_uac.pack(side=tk.LEFT)
+            self.btn_uac = QPushButton(uac_text)
+            self.btn_uac.clicked.connect(self.toggle_uac_setting)
+            service_row.addWidget(self.btn_uac)
         elif sys.platform == "darwin":
-            lbl_mac = ttk.Label(service_row, text="🍏 macOS Native Mode (CoreGraphics + Quartz Input)", foreground="#1565c0", font=("Segoe UI", 9, "bold"))
-            lbl_mac.pack(side=tk.LEFT)
+            lbl_mac = QLabel("🍏 macOS Native Mode (Qt6 Retina + CoreGraphics + Quartz)")
+            lbl_mac.setStyleSheet("color: #1d4ed8; font-weight: 700; font-size: 12px;")
+            service_row.addWidget(lbl_mac)
+        service_row.addStretch(1)
+        root_layout.addLayout(service_row)
 
-        # Status text
-        self.lbl_status = ttk.Label(bottom_frame, text="🟡 Initializing...", style="Status.TLabel")
-        self.lbl_status.pack(anchor=tk.W, pady=(4, 0))
+        # Status Bar
+        self.lbl_status = QLabel("🟡 Initializing...")
+        self.lbl_status.setStyleSheet("font-size: 12px; font-weight: 600; color: #b45309;")
+        root_layout.addWidget(self.lbl_status)
 
     def start_host_service(self):
         if self.host_service:
             self.host_service.stop()
-            
+
         self.host_service = HostService(
             relay_url=self.config.get("relay_server", "ws://localhost:8765"),
             my_id=self.config.get("my_id"),
@@ -181,51 +271,55 @@ class DeskLiteApp:
         self.host_service.start()
 
     def on_host_status(self, status, detail=""):
-        def update():
-            if status == "online":
-                self.lbl_status.config(text=f"🟢 {detail}", foreground="#2e7d32")
-            elif status == "connecting":
-                self.lbl_status.config(text=f"🟡 {detail}", foreground="#f57f17")
-            elif status == "busy":
-                self.lbl_status.config(text=f"🔵 {detail}", foreground="#1565c0")
-            elif status == "error" or status == "disconnected":
-                self.lbl_status.config(text=f"🔴 {detail}", foreground="#c62828")
-        self.root.after(0, update)
+        self.status_sig.emit(status, detail)
+
+    def _apply_host_status(self, status, detail):
+        if status == "online":
+            self.lbl_status.setText(f"🟢 {detail}")
+            self.lbl_status.setStyleSheet("font-size: 12px; font-weight: 600; color: #15803d;")
+        elif status == "connecting":
+            self.lbl_status.setText(f"🟡 {detail}")
+            self.lbl_status.setStyleSheet("font-size: 12px; font-weight: 600; color: #b45309;")
+        elif status == "busy":
+            self.lbl_status.setText(f"🔵 {detail}")
+            self.lbl_status.setStyleSheet("font-size: 12px; font-weight: 600; color: #1d4ed8;")
+        elif status in ("error", "disconnected"):
+            self.lbl_status.setText(f"🔴 {detail}")
+            self.lbl_status.setStyleSheet("font-size: 12px; font-weight: 600; color: #b91c1c;")
 
     def copy_id(self):
-        self.root.clipboard_clear()
-        self.root.clipboard_append(self.config.get("my_id", ""))
-        messagebox.showinfo("Copied", "Your ID has been copied to the clipboard!")
+        QApplication.clipboard().setText(self.config.get("my_id", ""))
+        QMessageBox.information(self, "Copied", "Your ID has been copied to the clipboard!")
 
     def new_id(self):
         new_val = common.generate_id()
         self.config["my_id"] = new_val
         common.save_config(self.config)
-        self.lbl_id.config(text=new_val)
+        self.lbl_id.setText(new_val)
         self.start_host_service()
 
     def new_password(self):
         new_val = common.generate_password()
         self.config["my_password"] = new_val
         common.save_config(self.config)
-        self.lbl_pw.config(text=new_val)
+        self.lbl_pw.setText(new_val)
         self.start_host_service()
 
     def save_server(self):
-        new_server = self.entry_server.get().strip()
+        new_server = self.entry_server.text().strip()
         if not new_server.startswith("ws://") and not new_server.startswith("wss://"):
-            messagebox.showwarning("Invalid URL", "The server URL must start with ws:// or wss://.")
+            QMessageBox.warning(self, "Invalid URL", "The server URL must start with ws:// or wss://.")
             return
         self.config["relay_server"] = new_server
         common.save_config(self.config)
         self.start_host_service()
-        messagebox.showinfo("Saved", f"ID / Rendezvous server updated: {new_server}")
+        QMessageBox.information(self, "Saved", f"ID / Rendezvous server updated: {new_server}")
 
-    def on_mode_change(self, event=None):
-        val = self.combo_mode.get()
-        if "Fast" in val or "Schnell" in val or "Turbo" in val:
+    def on_mode_change(self, index=None):
+        val = self.combo_mode.currentText()
+        if "Fast" in val:
             self.config["quality"] = 65
-            self.config["scale"] = 1.0  # Crisp text, never downscale!
+            self.config["scale"] = 1.0
         elif "HQ" in val:
             self.config["quality"] = 85
             self.config["scale"] = 1.0
@@ -238,74 +332,78 @@ class DeskLiteApp:
 
     def switch_to_system(self):
         if not common.elevate_to_system():
-            messagebox.showerror("Error", "Could not switch to SYSTEM mode (Administrator privileges required).")
+            QMessageBox.warning(
+                self,
+                "Elevation Failed",
+                "Could not switch to SYSTEM mode (Administrator privileges required)."
+            )
 
     def toggle_uac_setting(self):
         sec_desk_on = common.get_uac_secure_desktop()
         if sec_desk_on:
-            # Turn off Secure Desktop dimming while keeping normal UAC prompt (ConsentPromptBehaviorAdmin=5)
             if common.set_uac_secure_desktop(False):
                 self.config["uac_secure_desktop"] = False
                 common.save_config(self.config)
-                messagebox.showinfo(
-                    "UAC Optimized for Remote",
-                    "UAC prompts (Yes/No) will still appear normally, but without dimming the screen.\n\nThis allows you to see and click UAC dialogs in the remote viewer."
+                QMessageBox.information(
+                    self,
+                    "UAC Stream Enabled",
+                    "UAC prompts will now appear directly on the normal desktop so they are visible and clickable in the remote stream."
                 )
                 if hasattr(self, "btn_uac"):
-                    self.btn_uac.config(text="↩️ Restore UAC Screen Dimming")
+                    self.btn_uac.setText("↩️ Restore UAC Screen Dimming")
             else:
-                messagebox.showerror("Error", "Could not update UAC setting (Administrator privileges required).")
+                QMessageBox.critical(self, "Error", "Could not update UAC setting (Administrator privileges required).")
         else:
             if common.set_uac_secure_desktop(True):
                 self.config["uac_secure_desktop"] = True
                 common.save_config(self.config)
-                messagebox.showinfo(
+                QMessageBox.information(
+                    self,
                     "UAC Default Restored",
-                    "Windows screen dimming (Secure Desktop) for UAC prompts has been re-enabled."
+                    "Windows Secure Desktop dimming for UAC prompts has been restored."
                 )
                 if hasattr(self, "btn_uac"):
-                    self.btn_uac.config(text="🔓 Make UAC Visible in Stream")
+                    self.btn_uac.setText("🔓 Make UAC Visible in Stream")
             else:
-                messagebox.showerror("Error", "Could not update UAC setting (Administrator privileges required).")
+                QMessageBox.critical(self, "Error", "Could not update UAC setting (Administrator privileges required).")
 
-    def on_partner_selected(self, event=None):
-        pid = self.entry_partner_id.get().strip()
+    def on_partner_selected(self, text=None):
+        pid = self.entry_partner_id.currentText().strip()
         for p in self.config.get("recent_partners", []):
             if p.get("id") == pid:
-                self.entry_partner_pw.delete(0, tk.END)
-                self.entry_partner_pw.insert(0, p.get("password", ""))
+                self.entry_partner_pw.setText(p.get("password", ""))
                 break
 
     def connect_partner(self):
-        partner_id = self.entry_partner_id.get().strip()
-        partner_pw = self.entry_partner_pw.get().strip()
-        
+        partner_id = self.entry_partner_id.currentText().strip()
+        partner_pw = self.entry_partner_pw.text().strip()
+
         if not partner_id:
-            messagebox.showwarning("Missing Input", "Please enter a Partner ID.")
+            QMessageBox.warning(self, "Missing Input", "Please enter a Partner ID.")
             return
 
         common.remember_partner(self.config, partner_id, partner_pw)
-        self.entry_partner_id["values"] = [p["id"] for p in self.config.get("recent_partners", [])]
+        self.entry_partner_id.blockSignals(True)
+        self.entry_partner_id.clear()
+        self.entry_partner_id.addItems([p["id"] for p in self.config.get("recent_partners", [])])
+        self.entry_partner_id.setCurrentText(partner_id)
+        self.entry_partner_id.blockSignals(False)
 
         relay_url = self.config.get("relay_server", "ws://localhost:8765")
-        viewer = RemoteDesktopViewer(self.root, relay_url, partner_id, partner_pw)
+        viewer = RemoteDesktopViewer(self, relay_url, partner_id, partner_pw)
+        self.active_viewers.append(viewer)
 
-    def on_close(self):
+    def closeEvent(self, event):
         try:
             if self.host_service:
                 self.host_service.stop()
         except Exception:
             pass
-        try:
-            self.root.destroy()
-        except Exception:
-            pass
-        import os
         os._exit(0)
+
 
 def run_as_service():
     """Headless background runner when DeskLite is executed by Windows Service Manager."""
-    import time
     cfg = common.load_config()
     host_service = HostService(
         relay_url=cfg.get("relay_server", "ws://localhost:8765"),
@@ -322,8 +420,8 @@ def run_as_service():
     except (KeyboardInterrupt, SystemExit):
         host_service.stop()
 
+
 if __name__ == "__main__":
-    import sys
     if "--service" in sys.argv:
         run_as_service()
     else:
@@ -349,11 +447,7 @@ if __name__ == "__main__":
         if not cfg.get("uac_secure_desktop", False):
             common.set_uac_secure_desktop(False)
 
-        common.enable_dpi_awareness()
-        root = tk.Tk()
-        common.apply_tk_scaling(root)
-        app = DeskLiteApp(root)
-        root.mainloop()
-
-
-
+        app = QApplication(sys.argv)
+        window = DeskLiteApp()
+        window.show()
+        sys.exit(app.exec())

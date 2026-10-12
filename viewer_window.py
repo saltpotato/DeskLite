@@ -1,15 +1,18 @@
 import asyncio
 import collections
-import io
 import json
 import logging
 import struct
 import threading
 import time
-import tkinter as tk
-from tkinter import messagebox
 import websockets
-from PIL import Image, ImageTk
+
+from PySide6.QtCore import Qt, QRectF, Signal, QObject
+from PySide6.QtGui import QImage, QPainter, QColor
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QMessageBox, QSizePolicy
+)
+
 from common import get_clipboard_text, set_clipboard_text
 
 try:
@@ -20,31 +23,182 @@ except ImportError:
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [VIEWER] %(message)s")
 
+QT_KEY_MAP = {
+    Qt.Key.Key_Return: "return",
+    Qt.Key.Key_Enter: "enter",
+    Qt.Key.Key_Backspace: "backspace",
+    Qt.Key.Key_Tab: "tab",
+    Qt.Key.Key_Space: "space",
+    Qt.Key.Key_Shift: "shift",
+    Qt.Key.Key_Control: "ctrl",
+    Qt.Key.Key_Alt: "alt",
+    Qt.Key.Key_Escape: "escape",
+    Qt.Key.Key_Delete: "delete",
+    Qt.Key.Key_Home: "home",
+    Qt.Key.Key_End: "end",
+    Qt.Key.Key_PageUp: "page_up",
+    Qt.Key.Key_PageDown: "page_down",
+    Qt.Key.Key_Left: "left",
+    Qt.Key.Key_Right: "right",
+    Qt.Key.Key_Up: "up",
+    Qt.Key.Key_Down: "down",
+    Qt.Key.Key_CapsLock: "caps_lock",
+    Qt.Key.Key_Meta: "win",
+    Qt.Key.Key_Super_L: "win",
+    Qt.Key.Key_Super_R: "win",
+    Qt.Key.Key_F1: "f1",
+    Qt.Key.Key_F2: "f2",
+    Qt.Key.Key_F3: "f3",
+    Qt.Key.Key_F4: "f4",
+    Qt.Key.Key_F5: "f5",
+    Qt.Key.Key_F6: "f6",
+    Qt.Key.Key_F7: "f7",
+    Qt.Key.Key_F8: "f8",
+    Qt.Key.Key_F9: "f9",
+    Qt.Key.Key_F10: "f10",
+    Qt.Key.Key_F11: "f11",
+    Qt.Key.Key_F12: "f12",
+}
 
-class RemoteDesktopViewer(tk.Toplevel):
+
+class VideoCanvas(QWidget):
+    """Hardware/Retina-aware video surface that renders full-resolution QImage frames via QPainter."""
+    def __init__(self, viewer):
+        super().__init__(viewer)
+        self.viewer = viewer
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.img_pos_x = 0.0
+        self.img_pos_y = 0.0
+        self.img_draw_w = 1280.0
+        self.img_draw_h = 720.0
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(0, 0, 0))
+
+        qimg = self.viewer.base_qimage
+        if qimg is None or qimg.isNull():
+            painter.end()
+            return
+
+        cw = max(1.0, float(self.width()))
+        ch = max(1.0, float(self.height()))
+        aspect = float(qimg.width()) / max(1.0, float(qimg.height()))
+
+        if (cw / ch) > aspect:
+            draw_h = ch
+            draw_w = ch * aspect
+        else:
+            draw_w = cw
+            draw_h = cw / aspect
+
+        self.img_draw_w = draw_w
+        self.img_draw_h = draw_h
+        self.img_pos_x = (cw - draw_w) * 0.5
+        self.img_pos_y = (ch - draw_h) * 0.5
+
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        target_rect = QRectF(self.img_pos_x, self.img_pos_y, draw_w, draw_h)
+        painter.drawImage(target_rect, qimg)
+        painter.end()
+
+    def _calc_normalized_coords(self, pos):
+        if self.img_draw_w <= 0 or self.img_draw_h <= 0:
+            return None, None
+        rel_x = pos.x() - self.img_pos_x
+        rel_y = pos.y() - self.img_pos_y
+        if 0.0 <= rel_x <= self.img_draw_w and 0.0 <= rel_y <= self.img_draw_h:
+            nx = min(1.0, max(0.0, rel_x / self.img_draw_w))
+            ny = min(1.0, max(0.0, rel_y / self.img_draw_h))
+            return nx, ny
+        return None, None
+
+    def mouseMoveEvent(self, event):
+        now = time.time()
+        if now - self.viewer.last_mouse_time < 0.012:
+            return
+        self.viewer.last_mouse_time = now
+        pos = event.position()
+        nx, ny = self._calc_normalized_coords(pos)
+        if nx is not None:
+            self.viewer.send_input({"event": "mouse_move", "x": nx, "y": ny})
+
+    def _button_name(self, qt_btn):
+        if qt_btn == Qt.MouseButton.RightButton:
+            return "right"
+        if qt_btn == Qt.MouseButton.MiddleButton:
+            return "middle"
+        return "left"
+
+    def mousePressEvent(self, event):
+        self.setFocus()
+        pos = event.position()
+        nx, ny = self._calc_normalized_coords(pos)
+        if nx is not None:
+            self.viewer.send_input({"event": "mouse_move", "x": nx, "y": ny})
+            self.viewer.send_input({"event": "mouse_down", "button": self._button_name(event.button())})
+
+    def mouseReleaseEvent(self, event):
+        pos = event.position()
+        nx, ny = self._calc_normalized_coords(pos)
+        if nx is not None:
+            self.viewer.send_input({"event": "mouse_move", "x": nx, "y": ny})
+            self.viewer.send_input({"event": "mouse_up", "button": self._button_name(event.button())})
+
+    def wheelEvent(self, event):
+        dy = event.angleDelta().y()
+        if dy != 0:
+            delta = 1 if dy > 0 else -1
+            self.viewer.send_input({"event": "mouse_wheel", "delta": delta})
+
+    def keyPressEvent(self, event):
+        if event.isAutoRepeat():
+            return
+        key_name = QT_KEY_MAP.get(event.key(), "")
+        text = event.text()
+        char = text if (text and len(text) == 1 and ord(text) >= 32) else ""
+        if not key_name and char:
+            key_name = char
+        if key_name or char:
+            self.viewer.send_input({"event": "key_down", "key": key_name, "char": char})
+
+    def keyReleaseEvent(self, event):
+        if event.isAutoRepeat():
+            return
+        key_name = QT_KEY_MAP.get(event.key(), "")
+        text = event.text()
+        char = text if (text and len(text) == 1 and ord(text) >= 32) else ""
+        if not key_name and char:
+            key_name = char
+        if key_name or char:
+            self.viewer.send_input({"event": "key_up", "key": key_name, "char": char})
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self.viewer._check_clipboard_sync()
+
+
+class RemoteDesktopViewer(QWidget):
+    frame_ready_sig = Signal()
+    status_sig = Signal(str)
+    error_sig = Signal(str)
+
     def __init__(self, master, relay_url, target_id, password=""):
-        super().__init__(master)
+        super().__init__(None, Qt.WindowType.Window)
         self.relay_url = relay_url
         self.target_id = target_id
         self.password = password
 
-        self.title(f"Remote Session: {target_id}")
-        self.geometry("1280x720")
-        self.minsize(640, 480)
+        self.setWindowTitle(f"Remote Session: {target_id}")
+        self.resize(1280, 760)
+        self.setMinimumSize(640, 480)
 
         self.remote_width = 1920
         self.remote_height = 1080
+        self.base_qimage = None
 
-        self.canvas_w = 1280
-        self.canvas_h = 720
-        self.img_pos_x = 0
-        self.img_pos_y = 0
-        self.img_draw_w = 1280
-        self.img_draw_h = 720
-
-        self.current_photo = None
-        self.canvas_img_id = None
-        self.latest_frame = None
         self.render_pending = False
         self.running = True
         self.ws = None
@@ -59,88 +213,77 @@ class RemoteDesktopViewer(tk.Toplevel):
         self.fps_count = 0
         self.fps_timer = time.time()
         self.fps_display = 0
-        self.last_mouse_time = 0
+        self.last_mouse_time = 0.0
         self.last_clipboard = ""
         self.frame_queue = collections.deque(maxlen=30)
 
+        self.frame_ready_sig.connect(self._process_latest_frame)
+        self.status_sig.connect(self._update_status_label)
+        self.error_sig.connect(self._show_error)
+
         self._build_ui()
-        self._bind_events()
+        self.show()
+        self.canvas.setFocus()
 
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
-
-        # Start connection in background thread
         self.worker_thread = threading.Thread(target=self._run_async_worker, daemon=True)
         self.worker_thread.start()
 
-    def _make_toolbar_btn(self, text, bg_color, hover_color, command):
-        """Creates a cross-platform toolbar button that preserves dark background and white text on macOS Aqua Tk."""
-        lbl = tk.Label(
-            self.toolbar,
-            text=text,
-            bg=bg_color,
-            fg="white",
-            font=("Segoe UI", 9, "bold"),
-            padx=8,
-            pady=3,
-            cursor="hand2"
-        )
-        lbl.pack(side=tk.RIGHT, padx=3, pady=4)
-        lbl.bind("<ButtonRelease-1>", lambda e: command())
-        lbl.bind("<Enter>", lambda e: lbl.config(bg=hover_color))
-        lbl.bind("<Leave>", lambda e: lbl.config(bg=bg_color))
-        return lbl
+    def _make_btn(self, text, bg_color, hover_color, callback):
+        btn = QPushButton(text)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {bg_color};
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-size: 12px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background-color: {hover_color};
+            }}
+        """)
+        btn.clicked.connect(callback)
+        return btn
 
     def _build_ui(self):
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
         # Top toolbar
-        self.toolbar = tk.Frame(self, bg="#2c3e50", height=32)
-        self.toolbar.pack(fill=tk.X, side=tk.TOP)
+        self.toolbar = QWidget(self)
+        self.toolbar.setFixedHeight(38)
+        self.toolbar.setStyleSheet("background-color: #1e293b; border-bottom: 1px solid #334155;")
+        tb_layout = QHBoxLayout(self.toolbar)
+        tb_layout.setContentsMargins(12, 4, 12, 4)
+        tb_layout.setSpacing(6)
 
-        self.status_label = tk.Label(self.toolbar, text="Connecting...", bg="#2c3e50", fg="white", font=("Segoe UI", 9))
-        self.status_label.pack(side=tk.LEFT, padx=10, pady=4)
+        self.status_label = QLabel("Connecting...")
+        self.status_label.setStyleSheet("color: #f8fafc; font-size: 12px; font-weight: 500; border: none;")
+        tb_layout.addWidget(self.status_label)
+        tb_layout.addStretch(1)
 
-        self.btn_desktop = self._make_toolbar_btn("🖥️ Desktop", "#34495e", "#4b6584", lambda: self.send_shortcut("desktop"))
-        self.btn_clip = self._make_toolbar_btn("📋 Paste", "#34495e", "#4b6584", self.send_clipboard_to_host)
-        self.btn_explorer = self._make_toolbar_btn("📁 Explorer", "#34495e", "#4b6584", lambda: self.send_shortcut("explorer"))
-        self.btn_win = self._make_toolbar_btn("🪟 Start", "#34495e", "#4b6584", lambda: self.send_shortcut("win_key"))
-        self.btn_ctrl_alt_del = self._make_toolbar_btn("Ctrl+Alt+Del", "#34495e", "#4b6584", self.send_ctrl_alt_del)
+        tb_layout.addWidget(self._make_btn("🚀 Fast", "#059669", "#10b981", lambda: self.set_quality(65, 1.0)))
+        tb_layout.addWidget(self._make_btn("⚖️ Balanced", "#2563eb", "#3b82f6", lambda: self.set_quality(75, 1.0)))
+        tb_layout.addWidget(self._make_btn("💎 HQ", "#7c3aed", "#8b5cf6", lambda: self.set_quality(85, 1.0)))
 
-        self.btn_hq = self._make_toolbar_btn("💎 HQ", "#8e44ad", "#9b59b6", lambda: self.set_quality(85, 1.0))
-        self.btn_balanced = self._make_toolbar_btn("⚖️ Balanced", "#2980b9", "#3498db", lambda: self.set_quality(75, 1.0))
-        self.btn_fast = self._make_toolbar_btn("🚀 Fast", "#27ae60", "#2ecc71", lambda: self.set_quality(65, 1.0))
+        tb_layout.addWidget(self._make_btn("Ctrl+Alt+Del", "#334155", "#475569", self.send_ctrl_alt_del))
+        tb_layout.addWidget(self._make_btn("🪟 Start", "#334155", "#475569", lambda: self.send_shortcut("win_key")))
+        tb_layout.addWidget(self._make_btn("📁 Explorer", "#334155", "#475569", lambda: self.send_shortcut("explorer")))
+        tb_layout.addWidget(self._make_btn("📋 Paste", "#334155", "#475569", self.send_clipboard_to_host))
+        tb_layout.addWidget(self._make_btn("🖥️ Desktop", "#334155", "#475569", lambda: self.send_shortcut("desktop")))
 
-        # Canvas with hardware cursor enabled (0ms lag!)
-        self.canvas = tk.Canvas(self, bg="black", highlightthickness=0, cursor="arrow")
-        self.canvas.pack(fill=tk.BOTH, expand=True)
+        root_layout.addWidget(self.toolbar)
 
-    def _bind_events(self):
-        self.canvas.bind("<Configure>", self.on_canvas_resize)
+        self.canvas = VideoCanvas(self)
+        root_layout.addWidget(self.canvas, 1)
 
-        # Mouse events (ultra-responsive 80Hz updates)
-        self.canvas.bind("<Motion>", self.on_mouse_move)
-        self.canvas.bind("<B1-Motion>", self.on_mouse_move)
-        self.canvas.bind("<B2-Motion>", self.on_mouse_move)
-        self.canvas.bind("<B3-Motion>", self.on_mouse_move)
-
-        self.canvas.bind("<ButtonPress-1>", lambda e: self.on_mouse_button(e, "down", "left"))
-        self.canvas.bind("<ButtonRelease-1>", lambda e: self.on_mouse_button(e, "up", "left"))
-        self.canvas.bind("<ButtonPress-2>", lambda e: self.on_mouse_button(e, "down", "middle"))
-        self.canvas.bind("<ButtonRelease-2>", lambda e: self.on_mouse_button(e, "up", "middle"))
-        self.canvas.bind("<ButtonPress-3>", lambda e: self.on_mouse_button(e, "down", "right"))
-        self.canvas.bind("<ButtonRelease-3>", lambda e: self.on_mouse_button(e, "up", "right"))
-
-        self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)  # Windows
-        self.canvas.bind("<Button-4>", lambda e: self.on_mouse_wheel_linux(e, 1))  # Linux up
-        self.canvas.bind("<Button-5>", lambda e: self.on_mouse_wheel_linux(e, -1))  # Linux down
-
-        # Keyboard events
-        self.bind("<KeyPress>", self.on_key_press)
-        self.bind("<KeyRelease>", self.on_key_release)
-        self.bind("<F11>", lambda e: self.toggle_fullscreen())
-        self.bind("<FocusIn>", lambda e: self._check_clipboard_sync())
-
-    def toggle_fullscreen(self):
-        is_fs = self.attributes("-fullscreen")
-        self.attributes("-fullscreen", not is_fs)
+    def _update_status_label(self, text):
+        self.status_label.setText(text)
 
     def send_shortcut(self, name):
         self.send_input({"event": "shortcut", "name": name})
@@ -151,7 +294,7 @@ class RemoteDesktopViewer(tk.Toplevel):
             self.last_clipboard = text
             msg = json.dumps({"type": "clipboard", "text": text})
             asyncio.run_coroutine_threadsafe(self._ws_send(msg), self.loop)
-            self.status_label.config(text="📋 Clipboard sent to host")
+            self.status_sig.emit("📋 Clipboard sent to host")
 
     def _check_clipboard_sync(self):
         cur = get_clipboard_text()
@@ -170,54 +313,7 @@ class RemoteDesktopViewer(tk.Toplevel):
         if self.loop and self.loop.is_running():
             msg = json.dumps({"type": "set_quality", "quality": quality, "scale": scale})
             asyncio.run_coroutine_threadsafe(self._ws_send(msg), self.loop)
-            self.status_label.config(text=f"Profile active: Quality {quality}%, Scale {int(scale*100)}%")
-
-    def on_canvas_resize(self, event):
-        self.canvas_w = event.width
-        self.canvas_h = event.height
-
-    def _calc_normalized_coords(self, event_x, event_y):
-        if self.img_draw_w <= 0 or self.img_draw_h <= 0:
-            return None, None
-        rel_x = event_x - self.img_pos_x
-        rel_y = event_y - self.img_pos_y
-
-        if 0 <= rel_x <= self.img_draw_w and 0 <= rel_y <= self.img_draw_h:
-            norm_x = rel_x / float(self.img_draw_w)
-            norm_y = rel_y / float(self.img_draw_h)
-            return min(1.0, max(0.0, norm_x)), min(1.0, max(0.0, norm_y))
-        return None, None
-
-    def on_mouse_move(self, event):
-        now = time.time()
-        # Fast 80Hz throttle (~12ms) for smooth tracking
-        if now - self.last_mouse_time < 0.012:
-            return
-        self.last_mouse_time = now
-
-        nx, ny = self._calc_normalized_coords(event.x, event.y)
-        if nx is not None:
-            self.send_input({"event": "mouse_move", "x": nx, "y": ny})
-
-    def on_mouse_button(self, event, action, button):
-        self.canvas.focus_set()
-        nx, ny = self._calc_normalized_coords(event.x, event.y)
-        if nx is not None:
-            self.send_input({"event": "mouse_move", "x": nx, "y": ny})
-            self.send_input({"event": f"mouse_{action}", "button": button})
-
-    def on_mouse_wheel(self, event):
-        delta = 1 if event.delta > 0 else -1
-        self.send_input({"event": "mouse_wheel", "delta": delta})
-
-    def on_mouse_wheel_linux(self, event, delta):
-        self.send_input({"event": "mouse_wheel", "delta": delta})
-
-    def on_key_press(self, event):
-        self.send_input({"event": "key_down", "key": event.keysym, "char": event.char})
-
-    def on_key_release(self, event):
-        self.send_input({"event": "key_up", "key": event.keysym, "char": event.char})
+            self.status_sig.emit(f"Profile active: Quality {quality}%, Scale {int(scale*100)}%")
 
     def send_input(self, data):
         if self.loop and self.loop.is_running():
@@ -247,7 +343,7 @@ class RemoteDesktopViewer(tk.Toplevel):
             except Exception as e:
                 logging.debug(f"Connection error: {e}")
             if self.running:
-                self.after(0, lambda: self.status_label.config(text="🟡 Connection lost – reconnecting in 2s..."))
+                self.status_sig.emit("🟡 Connection lost – reconnecting in 2s...")
                 time.sleep(2)
 
     def _handle_incoming_binary(self, message):
@@ -277,7 +373,7 @@ class RemoteDesktopViewer(tk.Toplevel):
         self.frame_queue.append(frame_bytes)
         if not self.render_pending:
             self.render_pending = True
-            self.after_idle(self._process_latest_frame)
+            self.frame_ready_sig.emit()
 
     def _handle_incoming_json(self, message, from_signaling=False):
         try:
@@ -295,21 +391,20 @@ class RemoteDesktopViewer(tk.Toplevel):
             elif msg_type == "webrtc_answer" and self.webrtc_pc is not None:
                 asyncio.create_task(self._apply_webrtc_answer(meta))
             elif msg_type == "host_disconnected":
-                self.after(0, lambda: self.status_label.config(text="🟡 Host disconnected – waiting for reconnect..."))
+                self.status_sig.emit("🟡 Host disconnected – waiting for reconnect...")
                 return False
             elif msg_type == "clipboard":
                 text = meta.get("text", "")
                 if text and text != self.last_clipboard:
                     self.last_clipboard = text
                     set_clipboard_text(text)
-                    self.after(0, lambda: self.status_label.config(text="📋 Clipboard synced from host"))
+                    self.status_sig.emit("📋 Clipboard synced from host")
         except Exception:
             pass
         return True
 
     async def _upgrade_to_p2p(self, endpoints, token, webrtc_ok):
         """Upgrades the session from VPS signaling to a Direct P2P connection (LAN/VPN WebSocket or WebRTC STUN)."""
-        # 1. Try fast Direct WebSocket P2P endpoints first (LAN / VPN / localhost)
         if endpoints and token:
             for ep in endpoints:
                 if not self.running or self.p2p_ws is not None:
@@ -331,9 +426,7 @@ class RemoteDesktopViewer(tk.Toplevel):
                                 await self.ws.send(json.dumps({"type": "p2p_takeover"}))
                             except Exception:
                                 pass
-                        self.after(0, lambda: self.status_label.config(
-                            text=f"🟢 Direct P2P Connected to {self.target_id} (0 KB/s on VPS)"
-                        ))
+                        self.status_sig.emit(f"🟢 Direct P2P Connected to {self.target_id} (0 KB/s on VPS)")
                         asyncio.create_task(self._read_direct_p2p_ws(p2p_sock))
                         return
                     else:
@@ -341,7 +434,6 @@ class RemoteDesktopViewer(tk.Toplevel):
                 except Exception:
                     continue
 
-        # 2. Try WebRTC STUN UDP Hole Punching across NAT routers over the internet
         if HAS_WEBRTC and webrtc_ok and self.ws is not None and self.running:
             try:
                 config = RTCConfiguration(iceServers=[
@@ -358,9 +450,7 @@ class RemoteDesktopViewer(tk.Toplevel):
                     logging.info("Upgraded to Direct P2P WebRTC DataChannel!")
                     if self.ws is not None:
                         asyncio.ensure_future(self.ws.send(json.dumps({"type": "p2p_takeover"})))
-                    self.after(0, lambda: self.status_label.config(
-                        text=f"🟢 Direct P2P WebRTC Connected to {self.target_id} (0 KB/s on VPS)"
-                    ))
+                    self.status_sig.emit(f"🟢 Direct P2P WebRTC Connected to {self.target_id} (0 KB/s on VPS)")
 
                 @channel.on("message")
                 def on_message(msg):
@@ -435,11 +525,11 @@ class RemoteDesktopViewer(tk.Toplevel):
                     err_msg = resp.get("message", "Connection refused")
                     if "password" in err_msg.lower() or "passwort" in err_msg.lower():
                         self.running = False
-                        self.after(0, lambda: self._show_error(err_msg))
+                        self.error_sig.emit(err_msg)
                         return
                     return
 
-                self.after(0, lambda: self.status_label.config(text=f"Connected to {self.target_id} (Negotiating Direct P2P...)"))
+                self.status_sig.emit(f"Connected to {self.target_id} (Negotiating Direct P2P...)")
 
                 async for message in ws:
                     if not self.running:
@@ -475,48 +565,19 @@ class RemoteDesktopViewer(tk.Toplevel):
             while self.frame_queue:
                 frame_bytes = self.frame_queue.popleft()
                 if frame_bytes[:2] == b"DL" and len(frame_bytes) > 10:
-                    if getattr(self, "base_image", None) is not None:
+                    if self.base_qimage is not None and not self.base_qimage.isNull():
                         dx, dy, dw, dh = struct.unpack(">HHHH", frame_bytes[2:10])
-                        patch = Image.open(io.BytesIO(frame_bytes[10:]))
-                        self.base_image.paste(patch, (dx, dy))
+                        patch = QImage.fromData(frame_bytes[10:])
+                        if not patch.isNull():
+                            p = QPainter(self.base_qimage)
+                            p.drawImage(dx, dy, patch)
+                            p.end()
                 else:
-                    img = Image.open(io.BytesIO(frame_bytes))
-                    img.load()
-                    self.base_image = img
+                    qimg = QImage.fromData(frame_bytes)
+                    if not qimg.isNull():
+                        self.base_qimage = qimg
 
-            pil_img = getattr(self, "base_image", None)
-            if pil_img is None:
-                return
-
-            cw = max(100, self.canvas_w)
-            ch = max(100, self.canvas_h)
-
-            aspect = pil_img.width / float(pil_img.height)
-            if cw / float(ch) > aspect:
-                draw_h = ch
-                draw_w = int(ch * aspect)
-            else:
-                draw_w = cw
-                draw_h = int(cw / aspect)
-
-            self.img_draw_w = draw_w
-            self.img_draw_h = draw_h
-            self.img_pos_x = (cw - draw_w) // 2
-            self.img_pos_y = (ch - draw_h) // 2
-
-            if (draw_w, draw_h) == (pil_img.width, pil_img.height):
-                resized = pil_img
-            else:
-                resized = pil_img.resize((draw_w, draw_h), Image.Resampling.LANCZOS)
-
-            photo = ImageTk.PhotoImage(resized)
-            self.current_photo = photo
-
-            if not self.canvas_img_id:
-                self.canvas_img_id = self.canvas.create_image(self.img_pos_x, self.img_pos_y, anchor=tk.NW, image=photo)
-            else:
-                self.canvas.coords(self.canvas_img_id, self.img_pos_x, self.img_pos_y)
-                self.canvas.itemconfig(self.canvas_img_id, image=photo)
+            self.canvas.update()
 
             self.fps_count += 1
             now = time.time()
@@ -525,17 +586,17 @@ class RemoteDesktopViewer(tk.Toplevel):
                 self.fps_count = 0
                 self.fps_timer = now
                 fps_text = f"{self.transport_mode} | {self.target_id} | {self.remote_width}x{self.remote_height} | {self.fps_display} FPS"
-                self.status_label.config(text=fps_text)
+                self.status_label.setText(fps_text)
 
         except Exception as e:
             logging.debug(f"Frame decode error: {e}")
 
     def _show_error(self, message):
-        messagebox.showerror("Connection Error", message, parent=self)
-        self.destroy()
+        QMessageBox.critical(self, "Connection Error", message)
+        self.close()
 
-    def on_close(self):
+    def closeEvent(self, event):
         self.running = False
         if self.loop and self.loop.is_running():
             self.loop.call_soon_threadsafe(self.loop.stop)
-        self.destroy()
+        super().closeEvent(event)
