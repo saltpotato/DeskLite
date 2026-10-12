@@ -310,8 +310,46 @@
       }
     }
 
+    let p2pWs = null;
+    let rtcPc = null;
+    let rtcChannel = null;
+    let p2pUpgrading = false;
+    let dcChunks = {};
+
+    function sendMsg(payloadStr) {
+      if (p2pWs && p2pWs.readyState === WebSocket.OPEN) {
+        p2pWs.send(payloadStr);
+        return;
+      }
+      if (rtcChannel && rtcChannel.readyState === "open") {
+        rtcChannel.send(payloadStr);
+        return;
+      }
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(payloadStr);
+      }
+    }
+
+    function cleanupP2P() {
+      p2pUpgrading = false;
+      dcChunks = {};
+      if (p2pWs) {
+        try { p2pWs.close(); } catch (e) {}
+        p2pWs = null;
+      }
+      if (rtcChannel) {
+        try { rtcChannel.close(); } catch (e) {}
+        rtcChannel = null;
+      }
+      if (rtcPc) {
+        try { rtcPc.close(); } catch (e) {}
+        rtcPc = null;
+      }
+    }
+
     function disconnect() {
       shouldReconnect = false;
+      cleanupP2P();
       if (ws) {
         ws.close();
       }
@@ -325,20 +363,20 @@
     }
 
     function setQuality(quality, scale) {
-      if (ws && isConnected) {
-        ws.send(JSON.stringify({ type: "set_quality", quality: quality, scale: scale }));
+      if (isConnected) {
+        sendMsg(JSON.stringify({ type: "set_quality", quality: quality, scale: scale }));
         setStatus(`Profile: ${quality}%, ${Math.round(scale*100)}% Scale`, "green");
       }
     }
 
     function sendShortcut(name) {
-      if (ws && isConnected) {
-        ws.send(JSON.stringify({ type: "input", data: { event: "shortcut", name: name } }));
+      if (isConnected) {
+        sendMsg(JSON.stringify({ type: "input", data: { event: "shortcut", name: name } }));
       }
     }
 
     async function sendClipboard() {
-      if (!ws || !isConnected) return;
+      if (!isConnected) return;
       try {
         let text = "";
         if (navigator.clipboard && navigator.clipboard.readText) {
@@ -348,13 +386,13 @@
           text = prompt("Enter text to paste on remote PC:");
         }
         if (text) {
-          ws.send(JSON.stringify({ type: "clipboard", text: text }));
+          sendMsg(JSON.stringify({ type: "clipboard", text: text }));
           setStatus("📋 Clipboard sent to host", "green");
         }
       } catch(e) {
         let text = prompt("Enter text to paste on remote PC:");
-        if (text && ws && isConnected) {
-          ws.send(JSON.stringify({ type: "clipboard", text: text }));
+        if (text && isConnected) {
+          sendMsg(JSON.stringify({ type: "clipboard", text: text }));
           setStatus("📋 Clipboard sent to host", "green");
         }
       }
@@ -369,11 +407,12 @@
         return;
       }
 
+      cleanupP2P();
       const protocol = location.protocol === "https:" ? "wss:" : "ws:";
       const host = location.host || "localhost:8765";
       const wsUrl = `${protocol}//${host}`;
 
-      setStatus("Connecting to server...", "yellow");
+      setStatus("Connecting to signaling server...", "yellow");
       btnConnect.innerText = "Disconnect";
       btnConnect.style.background = "#dc2626";
 
@@ -383,11 +422,58 @@
       let frameQueue = [];
       let isRendering = false;
 
+      function enqueueBinaryFrame(buf) {
+        if (!buf || buf.byteLength < 4) return;
+        const u8 = new Uint8Array(buf);
+        // Check for 'DC' (0x44, 0x43) WebRTC DataChannel chunk header
+        if (u8[0] === 0x44 && u8[1] === 0x43 && buf.byteLength > 6) {
+          const view = new DataView(buf, 0, 6);
+          const seq = view.getUint16(2);
+          const idx = view.getUint8(4);
+          const total = view.getUint8(5);
+          if (!dcChunks[seq] || dcChunks[seq].total !== total) {
+            if (Object.keys(dcChunks).length > 4) dcChunks = {};
+            dcChunks[seq] = { total: total, parts: {}, count: 0, byteLen: 0 };
+          }
+          const entry = dcChunks[seq];
+          if (!entry.parts[idx]) {
+            const slice = new Uint8Array(buf, 6);
+            entry.parts[idx] = slice;
+            entry.count += 1;
+            entry.byteLen += slice.byteLength;
+          }
+          if (entry.count === total) {
+            const full = new Uint8Array(entry.byteLen);
+            let offset = 0;
+            for (let i = 0; i < total; i++) {
+              full.set(entry.parts[i], offset);
+              offset += entry.parts[i].byteLength;
+            }
+            delete dcChunks[seq];
+            enqueueCompleteFrame(full.buffer);
+          }
+          return;
+        }
+        enqueueCompleteFrame(buf);
+      }
+
+      function enqueueCompleteFrame(buf) {
+        const u8 = new Uint8Array(buf, 0, 2);
+        const isDelta = (u8[0] === 0x44 && u8[1] === 0x4C);
+        if (!isDelta) {
+          frameQueue.length = 0;
+        }
+        frameQueue.push(buf);
+        if (!isRendering) {
+          isRendering = true;
+          requestAnimationFrame(processFrameQueue);
+        }
+      }
+
       async function processFrameQueue() {
         while (frameQueue.length > 0) {
           const buf = frameQueue.shift();
           const u8 = new Uint8Array(buf, 0, 2);
-          // Check for 'DL' (0x44, 0x4C) Delta Bounding-Box header
           if (u8[0] === 0x44 && u8[1] === 0x4C && buf.byteLength > 10) {
             const view = new DataView(buf, 0, 10);
             const dx = view.getUint16(2);
@@ -401,7 +487,6 @@
               bmp.close();
             } catch (e) {}
           } else {
-            // Full Keyframe
             const blob = new Blob([buf], { type: "image/jpeg" });
             try {
               const bmp = await createImageBitmap(blob);
@@ -417,6 +502,147 @@
         isRendering = false;
       }
 
+      async function tryDirectP2PUpgrade(endpoints, token, webrtcSupported) {
+        // 1. Try Direct WebSocket on LAN/VPN if page is HTTP
+        if (location.protocol !== "https:" && Array.isArray(endpoints) && token) {
+          for (const ep of endpoints) {
+            if (p2pWs || (rtcChannel && rtcChannel.readyState === "open")) return;
+            try {
+              const candidate = await new Promise((resolve, reject) => {
+                const s = new WebSocket(ep);
+                s.binaryType = "arraybuffer";
+                const timer = setTimeout(() => { try { s.close(); } catch(e) {} reject(); }, 750);
+                s.onopen = () => {
+                  s.send(JSON.stringify({ action: "p2p_auth", token: token }));
+                };
+                s.onmessage = (ev) => {
+                  if (typeof ev.data === "string") {
+                    try {
+                      const r = JSON.parse(ev.data);
+                      if (r.status === "p2p_connected") {
+                        clearTimeout(timer);
+                        resolve(s);
+                      }
+                    } catch (e) {}
+                  }
+                };
+                s.onerror = () => { clearTimeout(timer); reject(); };
+              });
+              p2pWs = candidate;
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "p2p_takeover" }));
+              }
+              setStatus(`Direct P2P Connected (${targetId})`, "green");
+              p2pWs.onmessage = (ev) => {
+                if (typeof ev.data === "string") {
+                  handleJsonMsg(ev.data, false);
+                } else if (ev.data instanceof ArrayBuffer) {
+                  enqueueBinaryFrame(ev.data);
+                }
+              };
+              p2pWs.onclose = () => { p2pWs = null; };
+              return;
+            } catch (e) {}
+          }
+        }
+
+        // 2. Try WebRTC STUN UDP Hole Punching across routers
+        if (webrtcSupported && window.RTCPeerConnection && ws && ws.readyState === WebSocket.OPEN) {
+          try {
+            rtcPc = new RTCPeerConnection({
+              iceServers: [
+                { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }
+              ]
+            });
+            const dc = rtcPc.createDataChannel("desklite");
+            dc.binaryType = "arraybuffer";
+            dc.onopen = () => {
+              rtcChannel = dc;
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "p2p_takeover" }));
+              }
+              setStatus(`Direct P2P WebRTC (${targetId})`, "green");
+            };
+            dc.onmessage = (ev) => {
+              if (typeof ev.data === "string") {
+                handleJsonMsg(ev.data, false);
+              } else if (ev.data instanceof ArrayBuffer) {
+                enqueueBinaryFrame(ev.data);
+              }
+            };
+            dc.onclose = () => {
+              if (rtcChannel === dc) rtcChannel = null;
+            };
+
+            const offer = await rtcPc.createOffer();
+            await rtcPc.setLocalDescription(offer);
+            // Wait up to 600ms for STUN ICE candidates to be gathered into localDescription
+            await new Promise((resolve) => {
+              if (rtcPc.iceGatheringState === "complete") return resolve();
+              const t = setTimeout(resolve, 600);
+              rtcPc.onicegatheringstatechange = () => {
+                if (rtcPc && rtcPc.iceGatheringState === "complete") {
+                  clearTimeout(t);
+                  resolve();
+                }
+              };
+            });
+            if (ws && ws.readyState === WebSocket.OPEN && rtcPc.localDescription) {
+              ws.send(JSON.stringify({
+                type: "webrtc_offer",
+                sdp: rtcPc.localDescription.sdp,
+                sdpType: rtcPc.localDescription.type
+              }));
+            }
+          } catch (e) {}
+        }
+      }
+
+      function handleJsonMsg(rawStr, fromSignaling) {
+        try {
+          const msg = JSON.parse(rawStr);
+          if (msg.status === "connected") {
+            isConnected = true;
+            savePartner(targetId, pwd);
+            setStatus(`Connected to ${targetId}`, "green");
+            document.getElementById("welcomeOverlay").style.display = "none";
+            document.getElementById("qualityControls").style.display = "flex";
+            canvas.style.display = "block";
+          } else if (msg.status === "error") {
+            if (msg.message && (msg.message.toLowerCase().includes("password") || msg.message.toLowerCase().includes("passwort"))) {
+              shouldReconnect = false;
+              alert(msg.message);
+              disconnect();
+            } else {
+              setStatus(msg.message + " – retrying in 2s...", "yellow");
+            }
+          } else if (msg.type === "screen_info") {
+            remoteWidth = msg.width;
+            remoteHeight = msg.height;
+            canvas.width = remoteWidth;
+            canvas.height = remoteHeight;
+            if (fromSignaling && !p2pUpgrading && !p2pWs && !rtcChannel) {
+              p2pUpgrading = true;
+              tryDirectP2PUpgrade(msg.p2p_endpoints || [], msg.p2p_token || "", !!msg.webrtc_supported);
+            }
+          } else if (msg.type === "webrtc_answer" && rtcPc) {
+            rtcPc.setRemoteDescription(new RTCSessionDescription({
+              type: msg.sdpType || "answer",
+              sdp: msg.sdp
+            })).catch(() => {});
+          } else if (msg.type === "host_disconnected") {
+            setStatus("Host disconnected – waiting for reconnect...", "yellow");
+          } else if (msg.type === "clipboard") {
+            if (msg.text) {
+              if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(msg.text).catch(() => {});
+              }
+              setStatus("📋 Clipboard synced from host", "green");
+            }
+          }
+        } catch(e) {}
+      }
+
       ws.onopen = () => {
         setStatus("Authenticating...", "yellow");
         ws.send(JSON.stringify({
@@ -428,53 +654,9 @@
 
       ws.onmessage = async (evt) => {
         if (typeof evt.data === "string") {
-          try {
-            const msg = JSON.parse(evt.data);
-            if (msg.status === "connected") {
-              isConnected = true;
-              savePartner(targetId, pwd);
-              setStatus(`Connected to ${targetId}`, "green");
-              document.getElementById("welcomeOverlay").style.display = "none";
-              document.getElementById("qualityControls").style.display = "flex";
-              canvas.style.display = "block";
-            } else if (msg.status === "error") {
-              if (msg.message && (msg.message.toLowerCase().includes("password") || msg.message.toLowerCase().includes("passwort"))) {
-                shouldReconnect = false;
-                alert(msg.message);
-                disconnect();
-              } else {
-                // Host temporarily unavailable or busy
-                setStatus(msg.message + " – retrying in 2s...", "yellow");
-              }
-            } else if (msg.type === "screen_info") {
-              remoteWidth = msg.width;
-              remoteHeight = msg.height;
-              canvas.width = remoteWidth;
-              canvas.height = remoteHeight;
-            } else if (msg.type === "host_disconnected") {
-              setStatus("Host disconnected – waiting for reconnect...", "yellow");
-            } else if (msg.type === "clipboard") {
-              if (msg.text) {
-                if (navigator.clipboard && navigator.clipboard.writeText) {
-                  navigator.clipboard.writeText(msg.text).catch(() => {});
-                }
-                setStatus("📋 Clipboard synced from host", "green");
-              }
-            }
-          } catch(e) {}
+          handleJsonMsg(evt.data, true);
         } else if (evt.data instanceof ArrayBuffer) {
-          if (evt.data.byteLength < 4) return;
-          const u8 = new Uint8Array(evt.data, 0, 2);
-          const isDelta = (u8[0] === 0x44 && u8[1] === 0x4C);
-          if (!isDelta) {
-            // A full keyframe replaces the entire screen, so drop any stale queued frames
-            frameQueue.length = 0;
-          }
-          frameQueue.push(evt.data);
-          if (!isRendering) {
-            isRendering = true;
-            requestAnimationFrame(processFrameQueue);
-          }
+          enqueueBinaryFrame(evt.data);
         }
       };
 
@@ -511,42 +693,42 @@
 
     // Mouse handlers (80Hz smooth tracking)
     canvas.addEventListener("mousemove", (e) => {
-      if (!isConnected || !ws) return;
+      if (!isConnected) return;
       const now = performance.now();
       if (now - lastMouseSend < 12) return;
       lastMouseSend = now;
       const { x, y } = getNormalizedCoords(e);
-      ws.send(JSON.stringify({ type: "input", data: { event: "mouse_move", x, y } }));
+      sendMsg(JSON.stringify({ type: "input", data: { event: "mouse_move", x, y } }));
     });
 
     canvas.addEventListener("mousedown", (e) => {
-      if (!isConnected || !ws) return;
+      if (!isConnected) return;
       const { x, y } = getNormalizedCoords(e);
-      ws.send(JSON.stringify({ type: "input", data: { event: "mouse_move", x, y } }));
+      sendMsg(JSON.stringify({ type: "input", data: { event: "mouse_move", x, y } }));
       const btn = e.button === 2 ? "right" : (e.button === 1 ? "middle" : "left");
-      ws.send(JSON.stringify({ type: "input", data: { event: "mouse_down", button: btn } }));
+      sendMsg(JSON.stringify({ type: "input", data: { event: "mouse_down", button: btn } }));
     });
 
     canvas.addEventListener("mouseup", (e) => {
-      if (!isConnected || !ws) return;
+      if (!isConnected) return;
       const btn = e.button === 2 ? "right" : (e.button === 1 ? "middle" : "left");
-      ws.send(JSON.stringify({ type: "input", data: { event: "mouse_up", button: btn } }));
+      sendMsg(JSON.stringify({ type: "input", data: { event: "mouse_up", button: btn } }));
     });
 
     canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
     canvas.addEventListener("wheel", (e) => {
-      if (!isConnected || !ws) return;
+      if (!isConnected) return;
       e.preventDefault();
       const delta = e.deltaY < 0 ? 1 : -1;
-      ws.send(JSON.stringify({ type: "input", data: { event: "mouse_wheel", delta } }));
+      sendMsg(JSON.stringify({ type: "input", data: { event: "mouse_wheel", delta } }));
     }, { passive: false });
 
     // Keyboard handlers
     window.addEventListener("keydown", (e) => {
-      if (!isConnected || !ws) return;
+      if (!isConnected) return;
       if (e.target.tagName === "INPUT") return;
-      ws.send(JSON.stringify({
+      sendMsg(JSON.stringify({
         type: "input",
         data: { event: "key_down", key: e.key, char: e.key.length === 1 ? e.key : "" }
       }));
@@ -554,20 +736,20 @@
     });
 
     window.addEventListener("keyup", (e) => {
-      if (!isConnected || !ws) return;
+      if (!isConnected) return;
       if (e.target.tagName === "INPUT") return;
-      ws.send(JSON.stringify({
+      sendMsg(JSON.stringify({
         type: "input",
         data: { event: "key_up", key: e.key, char: e.key.length === 1 ? e.key : "" }
       }));
     });
 
     window.addEventListener("paste", (e) => {
-      if (!isConnected || !ws) return;
+      if (!isConnected) return;
       if (e.target.tagName === "INPUT") return;
       const text = (e.clipboardData || window.clipboardData).getData("text");
       if (text) {
-        ws.send(JSON.stringify({ type: "clipboard", text: text }));
+        sendMsg(JSON.stringify({ type: "clipboard", text: text }));
         setStatus("📋 Clipboard sent to host", "green");
       }
     });
