@@ -31,13 +31,21 @@ CMD_JPEG_PATCH = 0x05
 CMD_OVERLAY_META = 0x06
 
 
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
+
+
 def fast_region_hash(arr: np.ndarray) -> int:
-    """Computes an ultra-fast 64-bit content fingerprint of a 3D BGR/BGRA numpy region."""
+    """Computes an ultra-fast 64-bit content fingerprint of a 3D BGR/BGRA numpy region.
+    Uses 6-bit color quantization (>> 2) so 1-2 LSB DWM/GPU dithering noise never breaks cache hits."""
     h, w = arr.shape[:2]
     if h < 4 or w < 4:
         return 0
-    # Subsample every 4th pixel in X and Y for <0.15ms hashing even on 1080p regions
-    sub = np.ascontiguousarray(arr[::4, ::4, :3])
+    step = 2 if (w * h < 4096) else 4
+    sub = np.ascontiguousarray(arr[::step, ::step, :3] >> 2)
     c1 = zlib.adler32(sub.data) & 0xFFFFFFFF
     c2 = zlib.crc32(sub.data) & 0xFFFFFFFF
     # Mix dimensions into the 64-bit hash so differently sized regions never collide
@@ -87,13 +95,15 @@ class StateCacheRecognizer(BaseRecognizer):
     - Switching between Browser / IDE Tabs (Reiterkarten)
     - Selecting / Deselecting items, Hover states, Dropdown open/close, Blinking cursors
     - Returning to a previously seen scroll position
-    Saves 100% of JPEG image transfer (sends 17-byte CMD_RESTORE_STATE instead).
+    - Canonical & Sub-Region Peeling: When moving the mouse from Button A to adjacent Button B
+      (or when Hover-Out has a slightly different diff box than Hover-In), restores Button A
+      from RAM cache (0 KB) and shrinks the remaining patch to only Button B!
     """
     name = "StateCacheRecognizer"
 
     def analyze(self, ctx: FrameContext):
         x, y, w, h = ctx.dirty_rect
-        if w < 16 or h < 16:
+        if w < 12 or h < 12:
             return None
 
         prev_roi = ctx.prev_frame[y:y + h, x:x + w]
@@ -101,25 +111,18 @@ class StateCacheRecognizer(BaseRecognizer):
 
         prev_hash = fast_region_hash(prev_roi)
         curr_hash = fast_region_hash(curr_roi)
-        if prev_hash == 0 or curr_hash == 0 or prev_hash == curr_hash:
+        if prev_hash == 0 or curr_hash == 0:
             return None
 
         known: collections.OrderedDict = ctx.shared["known_states"]
         dirty_set: set = ctx.shared["dirty_states"]
         cmds = []
 
-        # 1. Queue saving the state currently on the Viewer's screen BEFORE overwriting it
-        if prev_hash not in known:
-            ctx.shared["pending_pre_save"] = (prev_hash, x, y, w, h)
-
-        # 2. Check if the new screen region is ALREADY in the Viewer's RAM cache (and not dirty)!
-        if curr_hash in known and curr_hash not in dirty_set:
-            pre = ctx.shared.get("pending_pre_save")
-            if pre:
-                phash, px, py, pw, ph = pre
-                cmds.append(pack_save_state(phash, px, py, pw, ph))
-                self._commit_known(known, dirty_set, phash, (px, py, pw, ph))
-                ctx.shared["pending_pre_save"] = None
+        # 1. Exact dirty_rect cache hit check
+        if prev_hash != curr_hash and curr_hash in known and curr_hash not in dirty_set:
+            if prev_hash not in known:
+                cmds.append(pack_save_state(prev_hash, x, y, w, h))
+                self._commit_known(known, dirty_set, prev_hash, (x, y, w, h))
 
             known.move_to_end(curr_hash)
             cmds.append(pack_restore_state(curr_hash, x, y, w, h))
@@ -139,7 +142,110 @@ class StateCacheRecognizer(BaseRecognizer):
             ctx.prev_frame[y:y + h, x:x + w] = curr_roi
             return cmds
 
-        ctx.shared["pending_post_save"] = (curr_hash, x, y, w, h)
+        # 2. Canonical & Sub-Region Known-Rect Peeling:
+        # Check if any recently cached rectangle R_k = (kx, ky, kw, kh) overlapping dirty_rect
+        # has transitioned to a known cached state (e.g. Button A un-hovering while adjacent Button B hovers,
+        # or Hover-Out bounding box differing by a few pixels from Hover-In).
+        seen_rects = set()
+        peeled_any = False
+        for k_rect in reversed(list(known.values())):
+            if k_rect == (x, y, w, h) or k_rect in seen_rects:
+                continue
+            seen_rects.add(k_rect)
+            if len(seen_rects) > 28:
+                break
+            kx, ky, kw, kh = k_rect
+            if kw * kh > w * h * 4:
+                continue
+            ix1, iy1 = max(x, kx), max(y, ky)
+            ix2, iy2 = min(x + w, kx + kw), min(y + h, ky + kh)
+            iw, ih = ix2 - ix1, iy2 - iy1
+            if iw < 12 or ih < 12:
+                continue
+            inter_area = iw * ih
+            if inter_area < 0.45 * (kw * kh) and inter_area < 0.45 * (w * h):
+                continue
+
+            k_curr_roi = ctx.curr_frame[ky:ky + kh, kx:kx + kw]
+            k_curr_hash = fast_region_hash(k_curr_roi)
+            if k_curr_hash not in known or k_curr_hash in dirty_set or known[k_curr_hash][2:] != (kw, kh):
+                continue
+
+            k_prev_roi = ctx.prev_frame[ky:ky + kh, kx:kx + kw]
+            k_diff = np.abs(k_prev_roi[::2, ::2, :3].astype(np.int16) - k_curr_roi[::2, ::2, :3].astype(np.int16)).max(axis=2) > 3
+            if not np.any(k_diff):
+                continue
+
+            # Save the outgoing state at k_rect (e.g. completed hover state) before restoring
+            k_prev_hash = fast_region_hash(k_prev_roi)
+            if k_prev_hash and k_prev_hash != k_curr_hash and k_prev_hash not in known:
+                cmds.append(pack_save_state(k_prev_hash, kx, ky, kw, kh))
+                self._commit_known(known, dirty_set, k_prev_hash, k_rect)
+
+            known.move_to_end(k_curr_hash)
+            cmds.append(pack_restore_state(k_curr_hash, kx, ky, kw, kh))
+            est_saved = max(1024, int(kw * kh * 0.12))
+            ctx.shared["bytes_saved"] += est_saved
+            cmds.append(pack_overlay_meta({
+                "event": "cache_hit",
+                "rect": [kx, ky, kw, kh],
+                "saved_kb": round(ctx.shared["bytes_saved"] / 1024.0, 1)
+            }))
+            if ctx.shared.get("debug_mode", True):
+                logging.info(
+                    f"[VF-DEBUG][HOST] CACHE_HIT_SUBRECT hash={k_curr_hash & 0xFFFFFFFF:08x} "
+                    f"rect=({kx},{ky},{kw}x{kh}) inside=({x},{y},{w}x{h}) saved={est_saved / 1024.0:.1f}KB"
+                )
+            ctx.prev_frame[ky:ky + kh, kx:kx + kw] = k_curr_roi
+            peeled_any = True
+
+        if peeled_any:
+            # Check if anything inside dirty_rect is STILL different after peeling the cached sub-rect(s)
+            rem_prev = ctx.prev_frame[y:y + h:2, x:x + w:2, :3]
+            rem_curr = ctx.curr_frame[y:y + h:2, x:x + w:2, :3]
+            rem_mask = np.abs(rem_prev.astype(np.int16) - rem_curr.astype(np.int16)).max(axis=2) > 3
+            rys, rxs = np.nonzero(rem_mask)
+            if rys.size == 0:
+                return cmds
+
+            # Shrink remaining dirty area to only the uncached part (e.g. newly hovered Button B)
+            fh, fw = ctx.curr_frame.shape[:2]
+            rx1 = max(0, x + int(rxs.min()) * 2)
+            ry1 = max(0, y + int(rys.min()) * 2)
+            rx2 = min(fw, x + (int(rxs.max()) + 1) * 2)
+            ry2 = min(fh, y + (int(rys.max()) + 1) * 2)
+            rw, rh = max(12, rx2 - rx1), max(12, ry2 - ry1)
+            rx2, ry2 = min(fw, rx1 + rw), min(fh, ry1 + rh)
+            rw, rh = int(rx2 - rx1), int(ry2 - ry1)
+
+            rem_prev_roi = ctx.prev_frame[ry1:ry2, rx1:rx2]
+            rem_curr_roi = ctx.curr_frame[ry1:ry2, rx1:rx2]
+            r_prev_hash = fast_region_hash(rem_prev_roi)
+            r_curr_hash = fast_region_hash(rem_curr_roi)
+
+            if r_prev_hash and r_prev_hash not in known:
+                cmds.append(pack_save_state(r_prev_hash, rx1, ry1, rw, rh))
+                self._commit_known(known, dirty_set, r_prev_hash, (rx1, ry1, rw, rh))
+
+            jpeg_bytes = ctx.encode_jpeg(rem_curr_roi, ctx.quality)
+            cmds.append(pack_jpeg_patch(rx1, ry1, rw, rh, jpeg_bytes))
+
+            if r_curr_hash and r_curr_hash not in known:
+                cmds.append(pack_save_state(r_curr_hash, rx1, ry1, rw, rh))
+                self._commit_known(known, dirty_set, r_curr_hash, (rx1, ry1, rw, rh))
+
+            if ctx.shared.get("debug_mode", True):
+                logging.info(
+                    f"[VF-DEBUG][HOST] PEELED_JPEG_PATCH rect=({rx1},{ry1},{rw}x{rh}) "
+                    f"size={len(jpeg_bytes) / 1024.0:.1f}KB"
+                )
+            ctx.prev_frame[ry1:ry2, rx1:rx2] = rem_curr_roi
+            return cmds
+
+        if prev_hash != curr_hash:
+            if prev_hash not in known:
+                ctx.shared["pending_pre_save"] = (prev_hash, x, y, w, h)
+            ctx.shared["pending_post_save"] = (curr_hash, x, y, w, h)
         return None
 
     @staticmethod
@@ -147,7 +253,7 @@ class StateCacheRecognizer(BaseRecognizer):
         known[shash] = rect
         known.move_to_end(shash)
         dirty_set.discard(shash)
-        while len(known) > 96:
+        while len(known) > 128:
             evicted, _ = known.popitem(last=False)
             dirty_set.discard(evicted)
 
@@ -592,49 +698,141 @@ class VisionHostPipeline:
         for p in self.plugins:
             p.on_input_event(evt, self.shared)
 
+    @staticmethod
+    def _refine_rect(prev_frame: np.ndarray, curr_frame: np.ndarray,
+                     rx1: int, ry1: int, rx2: int, ry2: int, fw: int, fh: int) -> tuple:
+        """Refines a coarse 4x4-grid bounding box to exact 2px-aligned boundaries of actual pixel changes
+        so adjacent touching buttons/controls never bleed into each other's bounding boxes."""
+        sx1, sy1 = max(0, rx1 - 4), max(0, ry1 - 4)
+        sx2, sy2 = min(fw, rx2 + 4), min(fh, ry2 + 4)
+        sub_p = prev_frame[sy1:sy2:2, sx1:sx2:2, :3]
+        sub_c = curr_frame[sy1:sy2:2, sx1:sx2:2, :3]
+        m = np.abs(sub_p.astype(np.int16) - sub_c.astype(np.int16)).max(axis=2) > 3
+        ys, xs = np.nonzero(m)
+        if ys.size == 0:
+            return (int(rx1), int(ry1), max(12, int(rx2 - rx1)), max(12, int(ry2 - ry1)))
+        px1 = sx1 + int(xs.min()) * 2
+        py1 = sy1 + int(ys.min()) * 2
+        px2 = min(fw, sx1 + (int(xs.max()) + 1) * 2)
+        py2 = min(fh, sy1 + (int(ys.max()) + 1) * 2)
+        w, h = max(12, px2 - px1), max(12, py2 - py1)
+        px2, py2 = min(fw, px1 + w), min(fh, py1 + h)
+        return (int(px1), int(py1), int(px2 - px1), int(py2 - py1))
+
+    @classmethod
+    def _extract_dirty_rects(cls, prev_frame: np.ndarray, curr_frame: np.ndarray,
+                             mask: np.ndarray, base_gx: int, base_gy: int,
+                             fw: int, fh: int, bridge_cells: int = 2, max_rects: int = 6) -> list[tuple]:
+        """
+        Splits a 4x4-grid boolean change mask into pixel-tight connected-component bounding boxes.
+        Bridges gaps up to `bridge_cells * 4` pixels so characters/borders of a single UI control
+        stay grouped together while separate buttons, tabs, or cursors become independent rects.
+        """
+        ys, xs = np.nonzero(mask)
+        if ys.size == 0:
+            return []
+
+        def _make_rect(c_xs, c_ys, off_gx, off_gy):
+            off_gx, off_gy = int(off_gx), int(off_gy)
+            rx1 = max(0, (off_gx + int(c_xs.min())) * 4)
+            ry1 = max(0, (off_gy + int(c_ys.min())) * 4)
+            rx2 = min(int(fw), (off_gx + int(c_xs.max()) + 1) * 4)
+            ry2 = min(int(fh), (off_gy + int(c_ys.max()) + 1) * 4)
+            return cls._refine_rect(prev_frame, curr_frame, rx1, ry1, rx2, ry2, int(fw), int(fh))
+
+        if HAS_CV2 and mask.shape[0] >= 4 and mask.shape[1] >= 4:
+            ksize = 2 * bridge_cells + 1
+            kernel = np.ones((ksize, ksize), dtype=np.uint8)
+            dilated = cv2.dilate(mask.astype(np.uint8), kernel)
+            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dilated, connectivity=8)
+            if 1 < num_labels <= max_rects + 1:
+                rects = []
+                for lid in range(1, num_labels):
+                    gx1, gy1, gw, gh = int(stats[lid, 0]), int(stats[lid, 1]), int(stats[lid, 2]), int(stats[lid, 3])
+                    sub_m = mask[gy1:gy1 + gh, gx1:gx1 + gw] & (labels[gy1:gy1 + gh, gx1:gx1 + gw] == lid)
+                    c_ys, c_xs = np.nonzero(sub_m)
+                    if c_ys.size > 0:
+                        rects.append(_make_rect(c_xs, c_ys, base_gx + gx1, base_gy + gy1))
+                if rects:
+                    return rects
+
+        return [_make_rect(xs, ys, base_gx, base_gy)]
+
     def encode_frame(self, curr_frame: np.ndarray, force: bool, encode_jpeg_fn, quality: int):
         """
         Single entry point called by `ScreenCapturer.capture_frame`.
-        Detects the dirty bounding box, runs all registered Vision/Memory plugins,
-        and returns either a `b"VF"` vision packet, a `b"DL"` delta JPEG, or a full keyframe.
+        Detects dirty islands on a 4x4 grid, runs registered Vision/Memory plugins
+        (hierarchical Macro-Island for Scroll/Panels -> Micro-Islands for Buttons/Hovers),
+        and returns a `b"VF"` vision packet or full keyframe.
         """
         fh, fw = curr_frame.shape[:2]
         if force or self.prev_frame is None or self.prev_frame.shape != curr_frame.shape:
             self.prev_frame = curr_frame.copy()
             return encode_jpeg_fn(curr_frame, quality)
 
-        # Fast 8x8 grid diff to locate bounding box of screen changes
-        g_prev = self.prev_frame[::8, ::8, :3]
-        g_curr = curr_frame[::8, ::8, :3]
-        mask = np.any(g_prev != g_curr, axis=2)
-        ys, xs = np.nonzero(mask)
-        if ys.size == 0:
+        # Fast 4x4 grid diff with 3-LSB noise floor to ignore invisible DWM dithering
+        g_prev = self.prev_frame[::4, ::4, :3]
+        g_curr = curr_frame[::4, ::4, :3]
+        mask = np.abs(g_prev.astype(np.int16) - g_curr.astype(np.int16)).max(axis=2) > 3
+        if not np.any(mask):
             return None
 
-        x1 = max(0, int(xs.min()) * 8)
-        y1 = max(0, int(ys.min()) * 8)
-        x2 = min(fw, (int(xs.max()) + 1) * 8)
-        y2 = min(fh, (int(ys.max()) + 1) * 8)
-        dirty_rect = (x1, y1, x2 - x1, y2 - y1)
+        # Step 1: Extract Macro Islands (32px gap bridging keeps scrolling pages & dialogs intact)
+        macro_rects = self._extract_dirty_rects(self.prev_frame, curr_frame, mask, 0, 0, fw, fh, bridge_cells=8, max_rects=4)
+        all_cmds = []
+        micro_count = 0
 
-        vf_packet = self.process_delta(self.prev_frame, curr_frame, dirty_rect, encode_jpeg_fn, quality)
-        if vf_packet is not None:
-            return vf_packet
+        for m_rect in macro_rects:
+            mx, my, mw, mh = m_rect
 
-        self.prev_frame = curr_frame.copy()
-        w, h = dirty_rect[2], dirty_rect[3]
-        if w * h >= fw * fh * 0.75:
-            return encode_jpeg_fn(curr_frame, quality)
+            # If Macro Island is large enough to be a Scroll viewport or full Tab switch, test plugins on it first
+            if mw >= 160 and mh >= 120:
+                self.shared["pending_cmds"].clear()
+                self.shared["pending_pre_save"] = None
+                self.shared["pending_post_save"] = None
+                ctx = FrameContext(self.prev_frame, curr_frame, m_rect, encode_jpeg_fn, quality, self.shared)
+                handled = False
+                for plugin in self.plugins:
+                    try:
+                        res_cmds = plugin.analyze(ctx)
+                        if res_cmds:
+                            all_cmds.extend(res_cmds)
+                            handled = True
+                            break
+                    except Exception:
+                        continue
+                if handled:
+                    micro_count += 1
+                    continue
 
-        patch_bytes = encode_jpeg_fn(curr_frame[y1:y2, x1:x2], quality)
-        return b"DL" + struct.pack(">HHHH", x1, y1, w, h) + patch_bytes
+            # Step 2: Not a scroll or whole-panel cache hit -> split Macro Island into tight Micro Islands
+            # (8px gap bridging isolates individual hovered buttons, menu items, icons, and cursors)
+            gy1, gy2 = my // 4, min(mask.shape[0], (my + mh + 3) // 4)
+            gx1, gx2 = mx // 4, min(mask.shape[1], (mx + mw + 3) // 4)
+            sub_mask = mask[gy1:gy2, gx1:gx2]
+            micro_rects = self._extract_dirty_rects(self.prev_frame, curr_frame, sub_mask, gx1, gy1, fw, fh, bridge_cells=2, max_rects=6)
 
-    def process_delta(self, prev_frame: np.ndarray, curr_frame: np.ndarray,
-                      dirty_rect: tuple, encode_jpeg_fn, quality: int):
+            for u_rect in micro_rects:
+                micro_count += 1
+                u_cmds = self._process_single_rect(self.prev_frame, curr_frame, u_rect, encode_jpeg_fn, quality)
+                if u_cmds is None:
+                    # Single massive un-cached screen change (>= 75% of screen area) -> send full keyframe
+                    self.prev_frame = curr_frame.copy()
+                    return encode_jpeg_fn(curr_frame, quality)
+                all_cmds.extend(u_cmds)
+
+        if all_cmds:
+            if micro_count > 1 and self.shared.get("debug_mode", True):
+                logging.info(f"[VF-DEBUG][HOST] MULTI_ISLAND split into {micro_count} independent regions")
+            return pack_vf_packet(all_cmds)
+
+        return None
+
+    def _process_single_rect(self, prev_frame: np.ndarray, curr_frame: np.ndarray,
+                             dirty_rect: tuple, encode_jpeg_fn, quality: int):
         """
-        Runs registered Recognizer plugins on `dirty_rect`.
-        Returns a `b"VF"` packet if any plugin optimized the frame (or queued state commands),
-        or `None` to fall back to the standard `b"DL"` delta JPEG.
+        Runs registered Recognizer plugins on a single `dirty_rect` and returns a list of
+        VF binary command chunks, or `None` if the rect covers >= 75% of the screen.
         """
         self.shared["pending_cmds"].clear()
         self.shared["pending_pre_save"] = None
@@ -645,41 +843,50 @@ class VisionHostPipeline:
             try:
                 result_cmds = plugin.analyze(ctx)
                 if result_cmds:
-                    return pack_vf_packet(result_cmds)
+                    return result_cmds
             except Exception:
                 continue
 
-        # If StateCacheRecognizer queued a pre/post save around a normal update (e.g. Tab switch),
-        # bundle SAVE_STATE(prev) + JPEG_PATCH(curr) + SAVE_STATE(curr) into a VF packet!
+        x, y, w, h = dirty_rect
+        if w * h >= curr_frame.shape[0] * curr_frame.shape[1] * 0.75:
+            return None
+
+        roi = curr_frame[y:y + h, x:x + w]
+        jpeg_bytes = encode_jpeg_fn(roi, quality)
+        cmds = []
+
         pre = self.shared.get("pending_pre_save")
+        if pre:
+            phash, px, py, pw, ph = pre
+            cmds.append(pack_save_state(phash, px, py, pw, ph))
+            StateCacheRecognizer._commit_known(self.shared["known_states"], self.shared["dirty_states"], phash, (px, py, pw, ph))
+            self.shared["pending_pre_save"] = None
+
+        cmds.extend(self.shared["pending_cmds"])
+        self.shared["pending_cmds"].clear()
+        cmds.append(pack_jpeg_patch(x, y, w, h, jpeg_bytes))
+
         post = self.shared.get("pending_post_save")
-        if self.shared["pending_cmds"] or pre or post:
-            x, y, w, h = dirty_rect
-            if w * h >= curr_frame.shape[0] * curr_frame.shape[1] * 0.75:
-                return None
-            roi = curr_frame[y:y + h, x:x + w]
-            jpeg_bytes = encode_jpeg_fn(roi, quality)
-            cmds = []
-            if pre:
-                phash, px, py, pw, ph = pre
-                cmds.append(pack_save_state(phash, px, py, pw, ph))
-                StateCacheRecognizer._commit_known(self.shared["known_states"], self.shared["dirty_states"], phash, (px, py, pw, ph))
-                self.shared["pending_pre_save"] = None
+        if post:
+            chash, sx, sy, sw, sh = post
+            cmds.append(pack_save_state(chash, sx, sy, sw, sh))
+            StateCacheRecognizer._commit_known(self.shared["known_states"], self.shared["dirty_states"], chash, (sx, sy, sw, sh))
+            self.shared["pending_post_save"] = None
 
-            cmds.extend(self.shared["pending_cmds"])
-            self.shared["pending_cmds"].clear()
-            cmds.append(pack_jpeg_patch(x, y, w, h, jpeg_bytes))
+        if self.shared.get("debug_mode", True):
+            logging.info(
+                f"[VF-DEBUG][HOST] JPEG_PATCH rect=({x},{y},{w}x{h}) "
+                f"size={len(jpeg_bytes) / 1024.0:.1f}KB"
+            )
 
-            if post:
-                chash, sx, sy, sw, sh = post
-                cmds.append(pack_save_state(chash, sx, sy, sw, sh))
-                StateCacheRecognizer._commit_known(self.shared["known_states"], self.shared["dirty_states"], chash, (sx, sy, sw, sh))
-                self.shared["pending_post_save"] = None
+        prev_frame[y:y + h, x:x + w] = roi
+        return cmds
 
-            prev_frame[y:y + h, x:x + w] = roi
-            return pack_vf_packet(cmds)
-
-        return None
+    def process_delta(self, prev_frame: np.ndarray, curr_frame: np.ndarray,
+                      dirty_rect: tuple, encode_jpeg_fn, quality: int):
+        """Backwards-compatible wrapper around `_process_single_rect`."""
+        cmds = self._process_single_rect(prev_frame, curr_frame, dirty_rect, encode_jpeg_fn, quality)
+        return pack_vf_packet(cmds) if cmds else None
 
 
 # ============================================================================
