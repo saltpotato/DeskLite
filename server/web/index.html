@@ -760,6 +760,15 @@
           } else if (cmd === 0x06 && offset + 5 <= buf.byteLength) {
             // CMD_OVERLAY_META
             const mlen = view.getUint32(offset + 1, false);
+            if (offset + 5 + mlen <= buf.byteLength && debugMode && debugRects.length > 0) {
+              try {
+                const txt = new TextDecoder().decode(new Uint8Array(buf, offset + 5, mlen));
+                if (txt.includes('"anim_cycle"')) {
+                  debugRects[debugRects.length - 1].label = "ANIM LOOP (0 KB)";
+                  drawDebugOverlay();
+                }
+              } catch (e) {}
+            }
             offset += 5 + mlen;
           } else {
             break;

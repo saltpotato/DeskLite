@@ -910,6 +910,163 @@ class WindowMove2DRecognizer(BaseRecognizer):
         return mv_x, mv_y
 
 
+class AnimationCycleRecognizer(BaseRecognizer):
+    """
+    Detects recurring UI animations (e.g. 'Working...' text shimmer, spinners, pulsing dots,
+    indeterminate progress bars) where consecutive frame deltas are spatially adjacent or
+    tightly interwoven ('benachbart oder eng verwoben'):
+    1. Merges adjacent/overlapping small dirty rects across consecutive frames into a
+       stable Canonical Animation Bounding Box `U = (ux, uy, uw, uh)`.
+    2. Stores perceptual thumbnails + Viewer RAM cache hashes for up to 32 phases of `U`.
+    3. Detects recursion/cycles (`mad <= 4.5` perceptual match against learned keyframes of `U`)
+       and replays the animation from the Viewer's RAM cache with 0 KB JPEG transfer!
+    """
+    name = "AnimationCycleRecognizer"
+
+    def analyze(self, ctx: FrameContext):
+        x, y, w, h = ctx.dirty_rect
+        # Only target compact UI animation regions (labels, spinners, badges, progress bars)
+        if w < 12 or h < 12 or w > 420 or h > 140 or (w * h) > 48000:
+            return None
+
+        now = time.time()
+        hotspots: list = ctx.shared.setdefault("anim_hotspots", [])
+        # Prune expired hotspots (inactive for > 3.0 seconds)
+        hotspots[:] = [hs for hs in hotspots if (now - hs["last_ts"]) <= 3.0]
+
+        known: collections.OrderedDict = ctx.shared["known_states"]
+        dirty_set: set = ctx.shared["dirty_states"]
+
+        # Find an existing hotspot that overlaps or is adjacent (within 16px) to dirty_rect
+        matched_hs = None
+        margin = 16
+        for hs in hotspots:
+            hx, hy, hw, hh = hs["rect"]
+            if (x <= hx + hw + margin and x + w + margin >= hx and
+                    y <= hy + hh + margin and y + h + margin >= hy):
+                matched_hs = hs
+                break
+
+        if matched_hs is None:
+            hotspots.append({
+                "rect": [int(x), int(y), int(w), int(h)],
+                "hits": 1,
+                "last_ts": now,
+                "keyframes": [],  # list of (shash, thumb_int16)
+            })
+            if len(hotspots) > 16:
+                hotspots.pop(0)
+            return None
+
+        # Check if dirty_rect expands the hotspot's canonical union box U = (ux, uy, uw, uh)
+        hx, hy, hw, hh = matched_hs["rect"]
+        ux1 = min(int(x), hx)
+        uy1 = min(int(y), hy)
+        ux2 = max(int(x + w), hx + hw)
+        uy2 = max(int(y + h), hy + hh)
+        uw, uh = ux2 - ux1, uy2 - uy1
+        if uw > 420 or uh > 140 or (uw * uh) > 48000:
+            return None
+
+        if (ux1, uy1, uw, uh) != (hx, hy, hw, hh):
+            matched_hs["rect"] = [ux1, uy1, uw, uh]
+
+        matched_hs["hits"] += 1
+        matched_hs["last_ts"] = now
+
+        # Activate animation cycle tracking once >= 2 interwoven updates occur in this hotspot
+        if matched_hs["hits"] < 2:
+            return None
+
+        ux, uy, uw, uh = matched_hs["rect"]
+
+        # 1. Recursion / Cycle Check: compare against learned keyframes that encompass dirty_rect
+        best_hash = None
+        best_rect = None
+        best_mad = 999.0
+        valid_kf = []
+        for khash, krect, kthumb in matched_hs["keyframes"]:
+            if khash not in known or khash in dirty_set or known[khash] != krect:
+                continue
+            valid_kf.append((khash, krect, kthumb))
+            kx, ky, kw, kh = krect
+            if not (kx <= x and ky <= y and kx + kw >= x + w and ky + kh >= y + h):
+                continue
+            kstep = 2 if (kw * kh < 8192) else 4
+            c_sub = ctx.curr_frame[ky:ky + kh:kstep, kx:kx + kw:kstep, :3].astype(np.int16)
+            if c_sub.shape != kthumb.shape:
+                continue
+            diff = np.abs(c_sub - kthumb)
+            mad = float(diff.mean())
+            if mad < best_mad:
+                inlier = float((diff.max(axis=2) <= 12).mean())
+                if mad <= 4.5 and inlier >= 0.90:
+                    best_mad = mad
+                    best_hash = khash
+                    best_rect = krect
+        matched_hs["keyframes"] = valid_kf
+
+        cmds = []
+        if best_hash is not None and best_rect is not None:
+            bx, by, bw, bh = best_rect
+            # Cycle hit! Replay this animation frame directly from the Viewer's RAM cache (0 KB JPEG)
+            ctx.shared["pending_pre_save"] = None
+            ctx.shared["pending_post_save"] = None
+            known.move_to_end(best_hash)
+            cmds.append(pack_restore_state(best_hash, bx, by, bw, bh))
+            est_saved = max(1024, int(bw * bh * 0.14))
+            ctx.shared["bytes_saved"] += est_saved
+            cmds.append(pack_overlay_meta({
+                "event": "anim_cycle",
+                "rect": [bx, by, bw, bh],
+                "saved_kb": round(ctx.shared["bytes_saved"] / 1024.0, 1)
+            }))
+            if ctx.shared.get("debug_mode", True):
+                logging.info(
+                    f"[VF-DEBUG][HOST] ANIM_CYCLE_HIT hash={best_hash & 0xFFFFFFFF:08x} "
+                    f"rect=({bx},{by},{bw}x{bh}) mad={best_mad:.2f} "
+                    f"keyframes={len(matched_hs['keyframes'])} saved={est_saved / 1024.0:.1f}KB"
+                )
+            ctx.prev_frame[by:by + bh, bx:bx + bw] = ctx.curr_frame[by:by + bh, bx:bx + bw]
+            return cmds
+
+        # 2. First pass of this animation phase: learn & cache the unified canonical box U = (ux, uy, uw, uh)
+        curr_u = ctx.curr_frame[uy:uy + uh, ux:ux + uw]
+        prev_u = ctx.prev_frame[uy:uy + uh, ux:ux + uw]
+        step = 2 if (uw * uh < 8192) else 4
+        curr_thumb = curr_u[::step, ::step, :3].astype(np.int16)
+
+        ctx.shared["pending_pre_save"] = None
+        ctx.shared["pending_post_save"] = None
+
+        if not matched_hs["keyframes"]:
+            prev_hash = fast_region_hash(prev_u)
+            if prev_hash and prev_hash not in known:
+                cmds.append(pack_save_state(prev_hash, ux, uy, uw, uh))
+                StateCacheRecognizer._commit_known(known, dirty_set, prev_hash, (ux, uy, uw, uh))
+                prev_thumb = prev_u[::step, ::step, :3].astype(np.int16)
+                matched_hs["keyframes"].append((prev_hash, (ux, uy, uw, uh), prev_thumb))
+
+        jpeg_bytes = ctx.encode_jpeg(curr_u, ctx.quality)
+        cmds.append(pack_jpeg_patch(ux, uy, uw, uh, jpeg_bytes))
+
+        curr_hash = fast_region_hash(curr_u)
+        if curr_hash:
+            cmds.append(pack_save_state(curr_hash, ux, uy, uw, uh))
+            StateCacheRecognizer._commit_known(known, dirty_set, curr_hash, (ux, uy, uw, uh))
+            matched_hs["keyframes"].append((curr_hash, (ux, uy, uw, uh), curr_thumb))
+            if len(matched_hs["keyframes"]) > 32:
+                matched_hs["keyframes"].pop(0)
+
+        if ctx.shared.get("debug_mode", True):
+            logging.info(
+                f"[VF-DEBUG][HOST] ANIM_LEARN_FRAME rect=({ux},{uy},{uw}x{uh}) "
+                f"keyframes={len(matched_hs['keyframes'])} size={len(jpeg_bytes) / 1024.0:.1f}KB"
+            )
+        ctx.prev_frame[uy:uy + uh, ux:ux + uw] = curr_u
+        return cmds
+
+
 # ============================================================================
 # 2. HOST PIPELINE MANAGER (Single Entry Point for `capturer.py`)
 # ============================================================================
@@ -923,6 +1080,7 @@ class VisionHostPipeline:
     def __init__(self):
         self.plugins: list[BaseRecognizer] = [
             StateCacheRecognizer(),
+            AnimationCycleRecognizer(),
             Scroll2DAndSliderRecognizer(),
             WindowMove2DRecognizer(),
         ]
@@ -930,6 +1088,7 @@ class VisionHostPipeline:
         self.shared = {
             "known_states": collections.OrderedDict(),
             "dirty_states": set(),
+            "anim_hotspots": [],
             "pending_cmds": [],
             "pending_pre_save": None,
             "pending_post_save": None,
@@ -947,6 +1106,7 @@ class VisionHostPipeline:
         self.prev_frame = None
         self.shared["known_states"].clear()
         self.shared["dirty_states"].clear()
+        self.shared["anim_hotspots"].clear()
         self.shared["pending_cmds"].clear()
         self.shared["pending_pre_save"] = None
         self.shared["pending_post_save"] = None
@@ -1106,6 +1266,12 @@ class VisionHostPipeline:
         Runs registered Recognizer plugins on a single `dirty_rect` and returns a list of
         VF binary command chunks, or `None` if the rect covers >= 75% of the screen.
         """
+        x, y, w, h = dirty_rect
+        sub_p = prev_frame[y:y + h:2, x:x + w:2, :3]
+        sub_c = curr_frame[y:y + h:2, x:x + w:2, :3]
+        if not np.any(np.abs(sub_p.astype(np.int16) - sub_c.astype(np.int16)).max(axis=2) > 3):
+            return []
+
         if run_plugins:
             self.shared["pending_cmds"].clear()
             self.shared["pending_pre_save"] = None
@@ -1411,6 +1577,8 @@ class VisionViewerDecoder:
     def _update_meta(self, meta: dict):
         self.last_event = meta.get("event", "")
         self.last_event_ts = time.time()
+        if self.last_event == "anim_cycle" and self.debug_rects:
+            self.debug_rects[-1]["label"] = "ANIM LOOP (0 KB)"
         if "saved_kb" in meta:
             self.saved_kb = meta["saved_kb"]
         if "virtual_y" in meta:
