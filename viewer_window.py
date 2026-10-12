@@ -187,6 +187,7 @@ class RemoteDesktopViewer(QWidget):
 
     def __init__(self, master, relay_url, target_id, password=""):
         super().__init__(None, Qt.WindowType.Window)
+        self.master_ref = master
         if master is not None and not master.windowIcon().isNull():
             self.setWindowIcon(master.windowIcon())
         self.relay_url = relay_url
@@ -597,8 +598,44 @@ class RemoteDesktopViewer(QWidget):
         QMessageBox.critical(self, "Connection Error", message)
         self.close()
 
+    async def _shutdown_connections(self):
+        if self.p2p_ws is not None:
+            try:
+                await self.p2p_ws.close()
+            except Exception:
+                pass
+            self.p2p_ws = None
+        if self.webrtc_channel is not None:
+            try:
+                self.webrtc_channel.close()
+            except Exception:
+                pass
+            self.webrtc_channel = None
+        if self.webrtc_pc is not None:
+            try:
+                await self.webrtc_pc.close()
+            except Exception:
+                pass
+            self.webrtc_pc = None
+        if self.ws is not None:
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
+
     def closeEvent(self, event):
         self.running = False
+        if self.master_ref is not None and hasattr(self.master_ref, "active_viewers"):
+            try:
+                if self in self.master_ref.active_viewers:
+                    self.master_ref.active_viewers.remove(self)
+            except Exception:
+                pass
         if self.loop and self.loop.is_running():
-            self.loop.call_soon_threadsafe(self.loop.stop)
+            try:
+                asyncio.run_coroutine_threadsafe(self._shutdown_connections(), self.loop)
+            except Exception:
+                pass
         super().closeEvent(event)
+

@@ -175,10 +175,13 @@ async def handle_websocket(websocket):
             for t_id, v_list in list(viewers.items()):
                 if websocket in v_list:
                     v_list.remove(websocket)
-                    logging.info(f"[-] Viewer disconnected from ID '{t_id}'")
+                    logging.info(f"[-] Viewer disconnected from ID '{t_id}' (remaining: {len(v_list)})")
                     if t_id in hosts:
                         try:
-                            await hosts[t_id].send(json.dumps({"type": "viewer_disconnected"}))
+                            await hosts[t_id].send(json.dumps({
+                                "type": "viewer_disconnected",
+                                "remaining_viewers": len(v_list)
+                            }))
                         except Exception:
                             pass
 

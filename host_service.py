@@ -225,10 +225,23 @@ class HostService:
             ])
             pc = RTCPeerConnection(configuration=config)
             self.webrtc_pcs.add(pc)
+            pc_channels = []
+
+            async def _cleanup_pc():
+                for ch in list(pc_channels):
+                    self.webrtc_channels.discard(ch)
+                self.webrtc_pcs.discard(pc)
+                self._update_session_status()
+                self._ensure_background_tasks()
+                try:
+                    await pc.close()
+                except Exception:
+                    pass
 
             @pc.on("datachannel")
             def on_datachannel(channel):
                 logging.info(f"WebRTC P2P DataChannel '{channel.label}' established (0 KB/s on VPS)!")
+                pc_channels.append(channel)
                 self.webrtc_channels.add(channel)
                 if self.relay_viewers > 0:
                     self.relay_viewers = max(0, self.relay_viewers - 1)
@@ -255,11 +268,12 @@ class HostService:
             @pc.on("connectionstatechange")
             async def on_state_change():
                 if pc.connectionState in ("failed", "closed", "disconnected"):
-                    self.webrtc_pcs.discard(pc)
-                    try:
-                        await pc.close()
-                    except Exception:
-                        pass
+                    await _cleanup_pc()
+
+            @pc.on("iceconnectionstatechange")
+            async def on_ice_state_change():
+                if pc.iceConnectionState in ("failed", "closed", "disconnected"):
+                    await _cleanup_pc()
 
             offer = RTCSessionDescription(sdp=data["sdp"], type=data.get("sdpType", "offer"))
             await pc.setRemoteDescription(offer)
@@ -277,6 +291,8 @@ class HostService:
     def _send_webrtc_frame(self, channel, frame_bytes):
         """Sends a binary JPEG frame over WebRTC DataChannel, splitting into 48KB chunks if needed."""
         if getattr(channel, "readyState", "") != "open":
+            self.webrtc_channels.discard(channel)
+            self._update_session_status()
             return
         if getattr(channel, "bufferedAmount", 0) > 256 * 1024:
             # Drop frame if UDP buffer is backed up to prevent latency spikes
@@ -317,9 +333,14 @@ class HostService:
                 # 1. Send to Direct P2P WebSocket viewers
                 for p2p_ws in list(self.p2p_ws_clients):
                     try:
-                        await p2p_ws.send(frame_bytes)
+                        await asyncio.wait_for(p2p_ws.send(frame_bytes), timeout=2.0)
                     except Exception:
                         self.p2p_ws_clients.discard(p2p_ws)
+                        self._update_session_status()
+                        try:
+                            asyncio.create_task(p2p_ws.close())
+                        except Exception:
+                            pass
 
                 # 2. Send to Direct WebRTC P2P DataChannel viewers
                 for channel in list(self.webrtc_channels):
@@ -327,9 +348,10 @@ class HostService:
                         self._send_webrtc_frame(channel, frame_bytes)
                     except Exception:
                         self.webrtc_channels.discard(channel)
+                        self._update_session_status()
 
-                # 3. ONLY send to VPS relay if there is still a viewer that hasn't upgraded to P2P!
-                if self.relay_viewers > 0 and not self.has_p2p_viewers and self.current_ws:
+                # 3. Send to VPS relay if there is any viewer that hasn't upgraded to P2P yet
+                if self.relay_viewers > 0 and self.current_ws:
                     try:
                         await self.current_ws.send(frame_bytes)
                     except Exception as e:
@@ -361,7 +383,7 @@ class HostService:
                                 channel.send(payload)
                         except Exception:
                             pass
-                    if self.relay_viewers > 0 and not self.has_p2p_viewers and self.current_ws:
+                    if self.relay_viewers > 0 and self.current_ws:
                         await self.current_ws.send(payload)
             except Exception:
                 pass
@@ -382,15 +404,42 @@ class HostService:
                 self._ensure_background_tasks()
 
             elif msg_type == "p2p_takeover":
-                # Viewer confirmed it switched to P2P and no longer needs VPS relay frames
-                self.relay_viewers = max(0, self.relay_viewers - 1)
+                # Viewer confirmed it switched to P2P
                 self._update_session_status()
 
             elif msg_type == "webrtc_offer" and signaling_ws:
                 asyncio.create_task(self._handle_webrtc_offer(data, signaling_ws))
 
             elif msg_type == "viewer_disconnected":
-                self.relay_viewers = max(0, self.relay_viewers - 1)
+                remaining = data.get("remaining_viewers")
+                if remaining == 0:
+                    # All signaling viewers have closed their sessions; clean up any lingering P2P/WebRTC state
+                    self.relay_viewers = 0
+                    for p2p_ws in list(self.p2p_ws_clients):
+                        self.p2p_ws_clients.discard(p2p_ws)
+                        try:
+                            asyncio.create_task(p2p_ws.close())
+                        except Exception:
+                            pass
+                    for ch in list(self.webrtc_channels):
+                        self.webrtc_channels.discard(ch)
+                        try:
+                            ch.close()
+                        except Exception:
+                            pass
+                    for pc in list(self.webrtc_pcs):
+                        self.webrtc_pcs.discard(pc)
+                        try:
+                            asyncio.create_task(pc.close())
+                        except Exception:
+                            pass
+                else:
+                    if self.relay_viewers > 0:
+                        self.relay_viewers = max(0, self.relay_viewers - 1)
+                    for ch in list(self.webrtc_channels):
+                        if getattr(ch, "readyState", "") != "open":
+                            self.webrtc_channels.discard(ch)
+
                 logging.info(f"Signaling viewer closed. Active P2P viewers: {len(self.p2p_ws_clients) + len(self.webrtc_channels)}, Relay viewers: {self.relay_viewers}")
                 self._update_session_status()
                 self._ensure_background_tasks()

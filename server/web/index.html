@@ -859,6 +859,9 @@
         setStatus("📋 Clipboard sent to host", "green");
       }
     });
+
+    window.addEventListener("pagehide", () => disconnect());
+    window.addEventListener("beforeunload", () => disconnect());
   </script>
 </body>
 </html>
