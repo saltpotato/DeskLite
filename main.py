@@ -36,34 +36,35 @@ def render_app_image(size=512):
     p.setBrush(QBrush(bg_grad))
     p.drawRoundedRect(rect, 102, 102)
 
-    # 2. Desktop Monitor (shifted slightly upper-left, calm & grounded)
-    mon_rect = QRectF(78, 112, 292, 194)
-    scr_grad = QLinearGradient(78, 112, 370, 306)
+    # 2. Smaller Desktop Monitor (compact, generous breathing room)
+    mon_rect = QRectF(116, 150, 240, 158)
+    scr_grad = QLinearGradient(116, 150, 356, 308)
     scr_grad.setColorAt(0.0, QColor("#09101d"))
     scr_grad.setColorAt(1.0, QColor("#132847"))
 
-    bezel_grad = QLinearGradient(78, 112, 78, 360)
+    bezel_grad = QLinearGradient(116, 150, 116, 356)
     bezel_grad.setColorAt(0.0, QColor("#94a3b8"))
     bezel_grad.setColorAt(1.0, QColor("#64748b"))
 
-    p.setPen(QPen(QBrush(bezel_grad), 12, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    p.setPen(QPen(QBrush(bezel_grad), 11, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
     p.setBrush(QBrush(scr_grad))
-    p.drawRoundedRect(mon_rect, 22, 22)
+    p.drawRoundedRect(mon_rect, 20, 20)
 
     # Subtle inner screen cyan rim
-    p.setPen(QPen(QColor(56, 189, 248, 60), 3))
+    p.setPen(QPen(QColor(56, 189, 248, 55), 2.5))
     p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawRoundedRect(mon_rect.adjusted(10, 10, -10, -10), 14, 14)
+    p.drawRoundedRect(mon_rect.adjusted(9, 9, -9, -9), 12, 12)
 
     # Monitor Stand & Base
-    p.setPen(QPen(QBrush(bezel_grad), 13, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-    p.drawLine(QPointF(224, 310), QPointF(224, 356))
-    p.drawLine(QPointF(166, 358), QPointF(282, 358))
+    p.setPen(QPen(QBrush(bezel_grad), 12, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.drawLine(QPointF(236, 312), QPointF(236, 350))
+    p.drawLine(QPointF(186, 352), QPointF(286, 352))
 
-    # 3. Minimalist Feather gently floating down past the bottom-right of the monitor
+    # 3. Smaller minimalist feather resting lightly on the right edge of the monitor
     p.save()
-    p.translate(326, 290)
-    p.rotate(-20)
+    p.translate(352, 232)
+    p.rotate(-28)
+    p.scale(0.68, 0.68)
 
     feather = QPainterPath()
     feather.moveTo(-105, 4)
@@ -75,11 +76,11 @@ def render_app_image(size=512):
     feather.cubicTo(-60, 30, -90, 18, -105, 4)
     feather.closeSubpath()
 
-    # Soft drop shadow across monitor bezel & dark background
+    # Soft drop shadow across the right monitor edge
     p.save()
     p.translate(-6, 14)
     p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QColor(0, 0, 0, 120))
+    p.setBrush(QColor(0, 0, 0, 125))
     p.drawPath(feather)
     p.restore()
 
@@ -88,7 +89,7 @@ def render_app_image(size=512):
     f_grad.setColorAt(0.0, QColor("#0ea5e9"))
     f_grad.setColorAt(0.55, QColor("#38bdf8"))
     f_grad.setColorAt(1.0, QColor("#f0f9ff"))
-    p.setPen(QPen(QColor("#e0f2fe"), 3))
+    p.setPen(QPen(QColor("#e0f2fe"), 3.5))
     p.setBrush(QBrush(f_grad))
     p.drawPath(feather)
 
@@ -96,7 +97,7 @@ def render_app_image(size=512):
     quill = QPainterPath()
     quill.moveTo(-136, -6)
     quill.cubicTo(-65, 14, 20, 14, 92, 4)
-    p.setPen(QPen(QColor("#ffffff"), 6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.setPen(QPen(QColor("#ffffff"), 6.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
     p.setBrush(Qt.BrushStyle.NoBrush)
     p.drawPath(quill)
 
