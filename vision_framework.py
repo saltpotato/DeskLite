@@ -1216,6 +1216,7 @@ class VisionHostPipeline:
         self.shared["virtual_y"] = 0
         self.shared["virtual_x"] = 0
         self.shared["dirty_below"] = False
+        self.shared["active_video"] = None
 
     def notify_input(self, evt: dict):
         if evt.get("event") == "vision_debug":
@@ -1277,6 +1278,11 @@ class VisionHostPipeline:
                      rx1: int, ry1: int, rx2: int, ry2: int, fw: int, fh: int) -> tuple:
         """Refines a coarse 4x4-grid bounding box to exact 1:1 boundaries of actual pixel changes
         without artificial padding so window transforms and strips never shear or shift."""
+        rw = rx2 - rx1
+        rh = ry2 - ry1
+        if rw >= 180 and rh >= 120:
+            return (int(rx1), int(ry1), int(rw), int(rh))
+
         sx1, sy1 = max(0, rx1 - 4), max(0, ry1 - 4)
         sx2, sy2 = min(fw, rx2 + 4), min(fh, ry2 + 4)
         sub_p = prev_frame[sy1:sy2, sx1:sx2, :3]
@@ -1284,7 +1290,7 @@ class VisionHostPipeline:
         m = np.abs(sub_p.astype(np.int16) - sub_c.astype(np.int16)).max(axis=2) > 1
         ys, xs = np.nonzero(m)
         if ys.size == 0:
-            return (int(rx1), int(ry1), max(12, int(rx2 - rx1)), max(12, int(ry2 - ry1)))
+            return (int(rx1), int(ry1), max(12, int(rw)), max(12, int(rh)))
         px1 = sx1 + int(xs.min())
         py1 = sy1 + int(ys.min())
         px2 = sx1 + int(xs.max()) + 1
@@ -1377,8 +1383,19 @@ class VisionHostPipeline:
         all_cmds = []
         micro_count = 0
 
+        now = time.time()
+        active_video = self.shared.setdefault("active_video", None)
+
         for m_rect in macro_rects:
             mx, my, mw, mh = m_rect
+
+            # Density of changes inside this Macro Island on 4x4 grid:
+            gy1, gy2 = my // 4, min(mask.shape[0], (my + mh + 3) // 4)
+            gx1, gx2 = mx // 4, min(mask.shape[1], (mx + mw + 3) // 4)
+            sub_mask = mask[gy1:gy2, gx1:gx2]
+            dirty_cells = int(np.count_nonzero(sub_mask))
+            total_cells = max(1, sub_mask.size)
+            density = dirty_cells / total_cells
 
             # If Macro Island is large enough to be a Scroll viewport or full Tab switch, test plugins on it first
             if mw >= 160 and mh >= 120:
@@ -1399,6 +1416,18 @@ class VisionHostPipeline:
                 if handled:
                     micro_count += 1
                     continue
+
+            # DENSE SURFACE FAST PATH:
+            # If not a scroll/window move, but dense (>= 35% dirty cells) and large (>= 200x150),
+            # do NOT fragment into 8 micro-islands! Slicing a dynamic video/canvas creates tearing
+            # and burns 5x CPU compressing 8 separate JPEGs. Encode directly as 1 cohesive patch:
+            if mw >= 200 and mh >= 150 and density >= 0.35:
+                patch = curr_frame[my:my + mh, mx:mx + mw]
+                jpeg_bytes = encode_jpeg_fn(patch, quality)
+                all_cmds.append(pack_jpeg_patch(mx, my, mw, mh, jpeg_bytes))
+                self.prev_frame[my:my + mh, mx:mx + mw] = curr_frame[my:my + mh, mx:mx + mw]
+                micro_count += 1
+                continue
 
             # Step 2: Not a scroll or whole-panel cache hit -> split Macro Island into tight Micro Islands
             # (8px gap bridging isolates individual hovered buttons, menu items, icons, and cursors)
