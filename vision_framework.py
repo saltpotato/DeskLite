@@ -277,6 +277,61 @@ class StateCacheRecognizer(BaseRecognizer):
             dirty_set.discard(evicted)
 
 
+class BackgroundRestoreRecognizer(BaseRecognizer):
+    """
+    Detects regions returning to the synchronized 2D Background Surface (`bg_frame` / `vfBgCanvas`):
+    - Closing context menus, dropdowns, start menus, tooltips, notification popups
+    - Windows minimized, closed, or moved away from a stationary background area
+    Restores the underlying background instantly with CMD_RESTORE_BG (0 KB JPEG, 9 bytes network)!
+    """
+    name = "BackgroundRestoreRecognizer"
+
+    def analyze(self, ctx: FrameContext):
+        x, y, w, h = ctx.dirty_rect
+        if w < 16 or h < 16:
+            return None
+
+        bg_frame = ctx.shared.get("bg_frame")
+        if bg_frame is None or bg_frame.shape[:2] != ctx.curr_frame.shape[:2]:
+            return None
+
+        curr_roi = ctx.curr_frame[y:y + h, x:x + w]
+        bg_roi = bg_frame[y:y + h, x:x + w]
+        if curr_roi.shape != bg_roi.shape:
+            return None
+
+        # Compare curr_roi against bg_roi on 2x2 grid (fast SIMD diff)
+        diff = np.abs(curr_roi[::2, ::2, :3].astype(np.int16) - bg_roi[::2, ::2, :3].astype(np.int16)).max(axis=2)
+        inlier_ratio = float((diff <= 6).mean())
+        mean_diff = float(diff.mean())
+
+        # If >= 93% of pixels match background within 6 RGB units and mean difference is tiny (<= 3.0 RGB)
+        if inlier_ratio >= 0.93 and mean_diff <= 3.0:
+            cmds = list(ctx.shared["pending_cmds"])
+            ctx.shared["pending_cmds"].clear()
+            ctx.shared["pending_pre_save"] = None
+            ctx.shared["pending_post_save"] = None
+
+            cmds.append(pack_restore_bg(x, y, w, h))
+            est_saved = max(512, int(w * h * 0.14))
+            ctx.shared["bytes_saved"] += est_saved
+            cmds.append(pack_overlay_meta({
+                "event": "bg_restore",
+                "rect": [x, y, w, h],
+                "saved_kb": round(ctx.shared["bytes_saved"] / 1024.0, 1)
+            }))
+            if ctx.shared.get("debug_mode", True):
+                logging.info(
+                    f"[VF-DEBUG][HOST] BG_RESTORE rect=({x},{y},{w}x{h}) "
+                    f"inliers={inlier_ratio*100:.1f}% mean_diff={mean_diff:.2f} "
+                    f"saved={est_saved / 1024.0:.1f}KB"
+                )
+            ctx.prev_frame[y:y + h, x:x + w] = curr_roi
+            return cmds
+
+        return None
+
+
 class Scroll2DAndSliderRecognizer(BaseRecognizer):
     """
     Detects 2D scrolling (vertical dy and horizontal dx) + monitors vertical/horizontal
@@ -732,10 +787,8 @@ class WindowMove2DRecognizer(BaseRecognizer):
         if mv is None:
             return None
         mv_x, mv_y = mv
-        # Window moves are 2D diagonal mouse drags across the desktop.
-        # Pure 1D vertical (mv_x == 0) or horizontal (mv_y == 0) shifts are in-container scrolls,
-        # which belong exclusively to Scroll2DAndSliderRecognizer.
-        if abs(mv_x) < 2 or abs(mv_y) < 2:
+        # Window moves are mouse drags across the desktop (diagonal, horizontal, or vertical)
+        if abs(mv_x) < 2 and abs(mv_y) < 2:
             return None
 
         src_x, src_y, dst_x, dst_y, win_w, win_h = self._get_window_coords(x, y, w, h, mv_x, mv_y)
@@ -902,7 +955,7 @@ class WindowMove2DRecognizer(BaseRecognizer):
             bg_sub = bg_frame[sy:sy + sh, sx:sx + sw]
             if bg_sub.shape == strip_arr.shape:
                 diff = np.abs(strip_arr[::2, ::2, :3].astype(np.int16) - bg_sub[::2, ::2, :3].astype(np.int16)).max(axis=2)
-                if float((diff <= 3).mean()) >= 0.995 and float(diff.mean()) <= 0.8:
+                if float((diff <= 6).mean()) >= 0.93 and float(diff.mean()) <= 3.2:
                     ctx.shared["bytes_saved"] += max(512, int(sw * sh * 0.14))
                     return [pack_restore_bg(sx, sy, sw, sh)], "bg"
 
@@ -989,9 +1042,18 @@ class AnimationCycleRecognizer(BaseRecognizer):
     name = "AnimationCycleRecognizer"
 
     def on_input_event(self, evt: dict, shared: dict):
-        # Clear animation hotspots when user clicks or types so typing is NEVER tracked as animation!
-        if evt.get("event") in ("key_down", "key_up", "mouse_down", "mouse_up", "shortcut"):
-            shared.get("anim_hotspots", []).clear()
+        # Only clear animation hotspots that directly intersect a mouse click location
+        # so ongoing spinners in browser tabs or background windows are never killed by unrelated input!
+        if evt.get("event") in ("mouse_down", "mouse_click"):
+            hotspots = shared.get("anim_hotspots", [])
+            mx = evt.get("x")
+            my = evt.get("y")
+            if mx is not None and my is not None and hotspots:
+                hotspots[:] = [
+                    hs for hs in hotspots
+                    if not (hs["rect"][0] - 24 <= mx <= hs["rect"][0] + hs["rect"][2] + 24 and
+                            hs["rect"][1] - 24 <= my <= hs["rect"][1] + hs["rect"][3] + 24)
+                ]
 
     @staticmethod
     def _make_thumb(roi: np.ndarray) -> tuple[np.ndarray, float]:
@@ -1005,11 +1067,10 @@ class AnimationCycleRecognizer(BaseRecognizer):
 
     def analyze(self, ctx: FrameContext):
         x, y, w, h = ctx.dirty_rect
-        # Target compact circular loading spinners (8x8 up to 64x64)
-        if w < 8 or h < 8 or w > 64 or h > 64:
-            return None
-        # Spinners are square! Non-square rects (text fields, buttons, cursors) must never trigger cycle matching!
-        if abs(w - h) > 18:
+        # Target animations up to 128x128 (e.g. 150% HiDPI spinners) and horizontal progress bars up to 256x36
+        is_square_spinner = (8 <= w <= 128 and 8 <= h <= 128 and abs(w - h) <= 24)
+        is_progress_bar = (16 <= w <= 256 and 4 <= h <= 36 and w >= 2 * h)
+        if not (is_square_spinner or is_progress_bar):
             return None
 
         fh, fw = ctx.curr_frame.shape[:2]
@@ -1058,7 +1119,9 @@ class AnimationCycleRecognizer(BaseRecognizer):
         ux2 = max(px2, hx + hw)
         uy2 = max(py2, hy + hh)
         uw, uh = ux2 - ux1, uy2 - uy1
-        if not (uw <= 64 and uh <= 64 and abs(uw - uh) <= 18):
+        is_u_spinner = (uw <= 128 and uh <= 128 and abs(uw - uh) <= 24)
+        is_u_bar = (uw <= 256 and uh <= 36 and uw >= 2 * uh)
+        if not (is_u_spinner or is_u_bar):
             return None
 
         if (ux1, uy1, uw, uh) != (hx, hy, hw, hh):
@@ -1111,14 +1174,14 @@ class AnimationCycleRecognizer(BaseRecognizer):
             if mad < best_mad and mad < max(1.8, step_mad * 0.80):
                 inlier = float((diff.max(axis=2) <= 10).mean())
                 mean_shift = float(np.abs(c_sub.mean(axis=(0, 1)) - kthumb.mean(axis=(0, 1))).max())
-                is_spinner = (kw <= 64 and kh <= 64 and abs(kw - kh) <= 18 and num_kf >= 6)
-                std_ok = (kstd > 3.5 and 0.70 <= (c_std / kstd) <= 1.35) if kstd > 3.5 else (c_std <= 5.0)
-                if mean_shift <= 8.0 and std_ok:
-                    if (mad <= 3.8 and inlier >= 0.94) or (is_spinner and mad <= 6.0):
-                        # Strict pixel verification: must match full pixel ROI to prevent visual corruption!
+                is_spinner = (kw <= 128 and kh <= 128 and abs(kw - kh) <= 24 and num_kf >= 4)
+                std_ok = (kstd > 2.5 and 0.65 <= (c_std / kstd) <= 1.45) if kstd > 2.5 else (c_std <= 6.0)
+                if mean_shift <= 10.0 and std_ok:
+                    if (mad <= 4.2 and inlier >= 0.90) or (is_spinner and mad <= 6.5):
+                        # Verification check: must match pixel ROI to prevent visual drift
                         if kroi is not None and kroi.shape == curr_u.shape:
                             p_diff = np.abs(curr_u.astype(np.int16) - kroi.astype(np.int16)).max(axis=2)
-                            if float((p_diff <= 4).mean()) < 0.98 or float(p_diff.mean()) > 1.2:
+                            if float((p_diff <= 8).mean()) < 0.90 or float(p_diff.mean()) > 4.5:
                                 continue
                         else:
                             continue
@@ -1151,14 +1214,20 @@ class AnimationCycleRecognizer(BaseRecognizer):
             ctx.prev_frame[by:by + bh, bx:bx + bw] = ctx.curr_frame[by:by + bh, bx:bx + bw]
             return cmds
 
-        # No cycle hit: silently record keyframe for future cycle detection and return None
-        # to allow normal clean delta JPEG encoding!
+        # No cycle hit: record keyframe for future cycle detection
         if len(matched_hs["keyframes"]) < 32:
             curr_hash = fast_region_hash(curr_u, ux, uy)
             if curr_hash and curr_hash not in known:
-                ctx.shared["pending_post_save"] = (curr_hash, ux, uy, uw, uh)
+                # Force clean full-union JPEG patch so state cache stores complete unclipped animation phase
+                patch_bytes = ctx.encode_jpeg(curr_u, ctx.quality)
+                cmds = [
+                    pack_jpeg_patch(ux, uy, uw, uh, patch_bytes),
+                    pack_save_state(curr_hash, ux, uy, uw, uh)
+                ]
                 StateCacheRecognizer._commit_known(known, dirty_set, curr_hash, (ux, uy, uw, uh))
                 matched_hs["keyframes"].append((curr_hash, (ux, uy, uw, uh), curr_u_thumb, curr_u_std, curr_u.copy()))
+                ctx.prev_frame[uy:uy + uh, ux:ux + uw] = curr_u
+                return cmds
         return None
 
 
@@ -1175,9 +1244,10 @@ class VisionHostPipeline:
     def __init__(self):
         self.plugins: list[BaseRecognizer] = [
             StateCacheRecognizer(),
+            BackgroundRestoreRecognizer(),
             AnimationCycleRecognizer(),
-            WindowMove2DRecognizer(),
             Scroll2DAndSliderRecognizer(),
+            WindowMove2DRecognizer(),
         ]
         self.prev_frame = None
         self.shared = {

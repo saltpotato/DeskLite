@@ -253,7 +253,7 @@
     debugCtx.imageSmoothingEnabled = false;
     let visionDebugMode = false;
     let debugRects = [];
-    let debugStats = { cache: 0, scroll: 0, bg: 0, jpeg: 0 };
+    let debugStats = { cache: 0, anim: 0, scroll: 0, bg: 0, jpeg: 0 };
     let statusText = document.getElementById("statusText");
     let badge = document.getElementById("badge");
     let btnConnect = document.getElementById("btnConnect");
@@ -575,6 +575,7 @@
       debugCtx.clearRect(0, 0, debugCanvas.width, debugCanvas.height);
       const palette = {
         cache:  { fill: "rgba(16, 185, 129, 0.28)", stroke: "#10b981", tag: "rgba(6, 95, 70, 0.9)" },
+        anim:   { fill: "rgba(168, 85, 247, 0.30)", stroke: "#c084fc", tag: "rgba(107, 33, 168, 0.9)" },
         scroll: { fill: "rgba(14, 165, 233, 0.24)", stroke: "#38bdf8", tag: "rgba(12, 74, 110, 0.9)" },
         bg:     { fill: "rgba(6, 182, 212, 0.28)",  stroke: "#22d3ee", tag: "rgba(21, 94, 117, 0.9)" },
         jpeg:   { fill: "rgba(244, 63, 94, 0.30)",  stroke: "#fb7185", tag: "rgba(136, 19, 55, 0.9)" },
@@ -598,12 +599,12 @@
       }
       // Top-left Legend Bar
       debugCtx.fillStyle = "rgba(15, 23, 42, 0.88)";
-      debugCtx.fillRect(14, 14, 710, 30);
+      debugCtx.fillRect(14, 14, 830, 30);
       debugCtx.strokeStyle = "rgba(56, 189, 248, 0.6)";
-      debugCtx.strokeRect(14, 14, 710, 30);
+      debugCtx.strokeRect(14, 14, 830, 30);
       debugCtx.fillStyle = "#f1f5f9";
       debugCtx.fillText(
-        `🔬 DEBUG  |  🟢 Cache (${debugStats.cache})   🔵 GPU-Move (${debugStats.scroll})   🔷 BG-Restore (${debugStats.bg})   🔴 Net-JPEG (${debugStats.jpeg})`,
+        `🔬 DEBUG  |  🟢 Cache (${debugStats.cache})   🟣 Anim (${debugStats.anim})   🔵 GPU-Move (${debugStats.scroll})   🔷 BG-Restore (${debugStats.bg})   🔴 Net-JPEG (${debugStats.jpeg})`,
         26, 34
       );
     }
@@ -829,7 +830,11 @@
               try {
                 const txt = new TextDecoder().decode(new Uint8Array(buf, offset + 5, mlen));
                 if (txt.includes('"anim_cycle"')) {
-                  debugRects[debugRects.length - 1].label = "ANIM LOOP (0 KB)";
+                  const last = debugRects[debugRects.length - 1];
+                  last.kind = "anim";
+                  last.label = "ANIM LOOP (0 KB)";
+                  if (debugStats.cache > 0) debugStats.cache--;
+                  debugStats.anim++;
                   renderDebugOverlay();
                 }
               } catch (e) {}
