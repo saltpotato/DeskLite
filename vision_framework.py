@@ -287,7 +287,7 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
             prev_roi[:inner_h, :inner_w, 1],
             curr_roi[:inner_h, :inner_w, 1],
             axis=1,
-            max_shift=min(h // 2, 360)
+            max_shift=min(int(h * 0.75), 520)
         )
         dy = 0
         best_score = 0.0
@@ -305,7 +305,7 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                 prev_roi[:inner_h, :inner_w, 1],
                 curr_roi[:inner_h, :inner_w, 1],
                 axis=0,
-                max_shift=min(w // 2, 360)
+                max_shift=min(int(w * 0.75), 520)
             )
             for cand_dx in dx_candidates:
                 ok, score = self._verify_overlap(prev_roi, curr_roi, cand_dx, 0, inner_w, inner_h)
@@ -893,7 +893,7 @@ class WindowMove2DRecognizer(BaseRecognizer):
             bg_sub = bg_frame[sy:sy + sh, sx:sx + sw]
             if bg_sub.shape == strip_arr.shape:
                 diff = np.abs(strip_arr[::2, ::2, :3].astype(np.int16) - bg_sub[::2, ::2, :3].astype(np.int16)).max(axis=2)
-                if float((diff <= 12).mean()) >= 0.94 and float(diff.mean()) <= 4.5:
+                if float((diff <= 12).mean()) >= 0.985 and float(diff.mean()) <= 2.5:
                     ctx.shared["bytes_saved"] += max(512, int(sw * sh * 0.14))
                     return [pack_restore_bg(sx, sy, sw, sh)], "bg"
 
@@ -919,7 +919,7 @@ class WindowMove2DRecognizer(BaseRecognizer):
     def _detect_2d_translation(prev_roi: np.ndarray, curr_roi: np.ndarray):
         """
         Finds a 2D translation vector (mv_x, mv_y) where `dst = src + (mv_x, mv_y)`
-        using FFT Phase Correlation in <0.15ms.
+        using FFT Phase Correlation with integer grid verification (<0.20ms).
         """
         h, w = prev_roi.shape[:2]
         if h < 40 or w < 40:
@@ -932,9 +932,32 @@ class WindowMove2DRecognizer(BaseRecognizer):
             shift, resp = cv2.phaseCorrelate(p_gray, c_gray)
             if resp < 0.25:
                 return None
-            mv_x = int(round(shift[0]))
-            mv_y = int(round(shift[1]))
-            return mv_x, mv_y
+            base_x = int(round(shift[0]))
+            base_y = int(round(shift[1]))
+
+            # Fine-tune exact integer shift across overlapping interior to eliminate 1-2px shearing
+            sy1 = 0 if base_y >= 0 else -base_y
+            sy2 = h - base_y if base_y >= 0 else h
+            sx1 = 0 if base_x >= 0 else -base_x
+            sx2 = w - base_x if base_x >= 0 else w
+
+            p_sub = prev_roi[sy1:sy2:4, sx1:sx2:4, :3].astype(np.int16)
+            c_base = curr_roi[sy1 + base_y : sy2 + base_y : 4, sx1 + base_x : sx2 + base_x : 4, :3].astype(np.int16)
+            base_score = float(np.abs(p_sub - c_base).mean())
+
+            best_mv = (base_x, base_y)
+            best_score = base_score
+
+            for dy in (base_y - 1, base_y + 1):
+                for dx in (base_x - 1, base_x + 1):
+                    if sy1 + dy < 0 or sy2 + dy > h or sx1 + dx < 0 or sx2 + dx > w:
+                        continue
+                    c_sub = curr_roi[sy1 + dy : sy2 + dy : 4, sx1 + dx : sx2 + dx : 4, :3].astype(np.int16)
+                    score = float(np.abs(p_sub - c_sub).mean())
+                    if score < best_score - 0.25:
+                        best_score = score
+                        best_mv = (dx, dy)
+            return best_mv
         except Exception:
             return None
 
@@ -1159,8 +1182,8 @@ class VisionHostPipeline:
         self.plugins: list[BaseRecognizer] = [
             StateCacheRecognizer(),
             AnimationCycleRecognizer(),
-            Scroll2DAndSliderRecognizer(),
             WindowMove2DRecognizer(),
+            Scroll2DAndSliderRecognizer(),
         ]
         self.prev_frame = None
         self.shared = {
@@ -1199,28 +1222,73 @@ class VisionHostPipeline:
             self.shared["debug_mode"] = bool(evt.get("enabled", True))
             logging.info(f"[VF-DEBUG][HOST] Debug logging toggled {'ON' if self.shared['debug_mode'] else 'OFF'}")
             return
+        if evt.get("event") == "debug_snapshot":
+            self._save_diagnostic_snapshot()
+            return
         if evt.get("event") in ("key_down", "mouse_down"):
             self.shared["dirty_below"] = False
         for p in self.plugins:
             p.on_input_event(evt, self.shared)
 
+    def _save_diagnostic_snapshot(self):
+        """Saves host screen and computes diff heatmap against viewer_canvas.png if available."""
+        if not HAS_CV2 or self.prev_frame is None:
+            return
+        try:
+            import os
+            os.makedirs("debug_snapshots", exist_ok=True)
+            host_path = os.path.join("debug_snapshots", "host_screen.png")
+            cv2.imwrite(host_path, self.prev_frame)
+            viewer_path = os.path.join("debug_snapshots", "viewer_canvas.png")
+            diff_path = os.path.join("debug_snapshots", "diff_heatmap.png")
+            if os.path.exists(viewer_path):
+                v_img = cv2.imread(viewer_path)
+                if v_img is not None and v_img.shape == self.prev_frame.shape:
+                    diff = np.abs(v_img.astype(np.int16) - self.prev_frame.astype(np.int16))
+                    diff_max = diff.max(axis=2)
+                    bad_mask = diff_max > 15
+                    bad_count = int(bad_mask.sum())
+
+                    heatmap = np.zeros_like(self.prev_frame)
+                    gray = cv2.cvtColor(self.prev_frame, cv2.COLOR_BGR2GRAY)
+                    heatmap[:, :, 0] = gray // 4
+                    heatmap[:, :, 1] = gray // 4
+                    heatmap[:, :, 2] = gray // 4
+
+                    amplified = np.clip(diff_max.astype(np.uint16) * 6, 40, 255).astype(np.uint8)
+                    heatmap[bad_mask, 2] = amplified[bad_mask]
+                    heatmap[bad_mask, 1] = amplified[bad_mask] // 3
+
+                    if bad_count > 0:
+                        dil = cv2.dilate(bad_mask.astype(np.uint8), np.ones((9, 9), dtype=np.uint8))
+                        num_l, _, stats, _ = cv2.connectedComponentsWithStats(dil, connectivity=8)
+                        for lid in range(1, min(num_l, 16)):
+                            bx, by, bw, bh = int(stats[lid, 0]), int(stats[lid, 1]), int(stats[lid, 2]), int(stats[lid, 3])
+                            cv2.rectangle(heatmap, (bx, by), (bx + bw, by + bh), (0, 255, 0), 2)
+                            cv2.putText(heatmap, f"Diff {bw}x{bh}", (bx, max(14, by - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
+
+                    cv2.imwrite(diff_path, heatmap)
+                    logging.info(f"[VF-DEBUG][HOST] 📸 Diagnostic snapshot saved: {diff_path} (mismatch pixels: {bad_count})")
+        except Exception as e:
+            logging.error(f"[VF-DEBUG][HOST] Snapshot failed: {e}")
+
     @staticmethod
     def _refine_rect(prev_frame: np.ndarray, curr_frame: np.ndarray,
                      rx1: int, ry1: int, rx2: int, ry2: int, fw: int, fh: int) -> tuple:
         """Refines a coarse 4x4-grid bounding box to exact 1:1 boundaries of actual pixel changes
-        with 1px safety margin so anti-aliasing edges never get clipped."""
+        without artificial padding so window transforms and strips never shear or shift."""
         sx1, sy1 = max(0, rx1 - 4), max(0, ry1 - 4)
         sx2, sy2 = min(fw, rx2 + 4), min(fh, ry2 + 4)
         sub_p = prev_frame[sy1:sy2, sx1:sx2, :3]
         sub_c = curr_frame[sy1:sy2, sx1:sx2, :3]
-        m = np.abs(sub_p.astype(np.int16) - sub_c.astype(np.int16)).max(axis=2) > 3
+        m = np.abs(sub_p.astype(np.int16) - sub_c.astype(np.int16)).max(axis=2) > 1
         ys, xs = np.nonzero(m)
         if ys.size == 0:
             return (int(rx1), int(ry1), max(12, int(rx2 - rx1)), max(12, int(ry2 - ry1)))
-        px1 = max(0, sx1 + int(xs.min()) - 1)
-        py1 = max(0, sy1 + int(ys.min()) - 1)
-        px2 = min(fw, sx1 + int(xs.max()) + 2)
-        py2 = min(fh, sy1 + int(ys.max()) + 2)
+        px1 = sx1 + int(xs.min())
+        py1 = sy1 + int(ys.min())
+        px2 = sx1 + int(xs.max()) + 1
+        py2 = sy1 + int(ys.max()) + 1
         w, h = max(12, px2 - px1), max(12, py2 - py1)
         px2, py2 = min(fw, px1 + w), min(fh, py1 + h)
         return (int(px1), int(py1), int(px2 - px1), int(py2 - py1))

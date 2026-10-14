@@ -161,6 +161,9 @@ class VideoCanvas(QWidget):
     def keyPressEvent(self, event):
         if event.isAutoRepeat():
             return
+        if event.key() == Qt.Key.Key_F11:
+            self.viewer.take_debug_snapshot()
+            return
         key_name = QT_KEY_MAP.get(event.key(), "")
         text = event.text()
         char = text if (text and len(text) == 1 and ord(text) >= 32) else ""
@@ -286,11 +289,23 @@ class RemoteDesktopViewer(QWidget):
         tb_layout.addWidget(self._make_btn("📋 Paste", "#334155", "#475569", self.send_clipboard_to_host))
         tb_layout.addWidget(self._make_btn("🖥️ Desktop", "#334155", "#475569", lambda: self.send_shortcut("desktop")))
         tb_layout.addWidget(self._make_btn("🔬 Debug", "#0d9488", "#14b8a6", self.toggle_vision_debug))
+        tb_layout.addWidget(self._make_btn("📸 Snapshot (F11)", "#d97706", "#f59e0b", self.take_debug_snapshot))
 
         root_layout.addWidget(self.toolbar)
 
         self.canvas = VideoCanvas(self)
         root_layout.addWidget(self.canvas, 1)
+
+    def take_debug_snapshot(self):
+        try:
+            import os
+            os.makedirs("debug_snapshots", exist_ok=True)
+            if self.base_qimage is not None and not self.base_qimage.isNull():
+                self.base_qimage.save(os.path.join("debug_snapshots", "viewer_canvas.png"))
+            self.send_input({"event": "debug_snapshot"})
+            self.status_sig.emit("📸 Snapshot saved -> debug_snapshots/diff_heatmap.png")
+        except Exception as e:
+            self.status_sig.emit(f"Snapshot error: {e}")
 
     def toggle_vision_debug(self):
         active = self.vision_decoder.toggle_debug(self.send_input)

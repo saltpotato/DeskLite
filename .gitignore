@@ -35,3 +35,7 @@ desklite.icns
 # OS generated
 Thumbs.db
 Desktop.ini
+
+# Debug snapshots
+debug_snapshots/
+
