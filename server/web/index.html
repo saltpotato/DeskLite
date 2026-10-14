@@ -194,8 +194,8 @@
         <button type="button" onclick="sendShortcut('desktop')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Show Desktop / Minimize all windows (Win+D)">🖥️ Desktop</button>
         <button type="button" onclick="sendClipboard()" style="background:#374151; padding:4px 8px; font-size:11px;" title="Send local clipboard text to remote PC">📋 Paste</button>
         <button type="button" onclick="sendShortcut('win_key')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Open Start Menu">🪟 Start</button>
-        <button type="button" onclick="sendShortcut('explorer')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Open File Explorer">📁 Explorer</button>
         <button type="button" id="btnVisionDebug" onclick="toggleVisionDebug()" style="background:#374151; padding:4px 8px; font-size:11px;" title="Toggle Android-style Vision Surface Update Debug Coloring">🔬 Debug: OFF</button>
+        <button type="button" id="btnReloadVision" onclick="reloadVisionEngine()" style="background:#374151; padding:4px 8px; font-size:11px;" title="Hot-reload vision_framework.py on remote host without restarting">🔄 Reload Vision</button>
       </div>
       <div style="height: 20px; width: 1px; background: #444; margin: 0 4px;"></div>
       <a href="/download/DeskLite.exe" download style="text-decoration:none;">
@@ -498,6 +498,28 @@
       } else {
         renderDebugOverlay();
       }
+    }
+
+    function reloadVisionEngine() {
+      const btn = document.getElementById("btnReloadVision");
+      if (btn) {
+        btn.innerText = "⏳ Reloading...";
+        btn.style.background = "#d97706";
+      }
+      if (isConnected) {
+        sendMsg(JSON.stringify({ type: "reload_vision" }));
+        sendMsg(JSON.stringify({ type: "input", data: { event: "reload_vision" } }));
+      }
+      setTimeout(() => {
+        if (btn) {
+          btn.innerText = "✅ Reloaded!";
+          btn.style.background = "#059669";
+          setTimeout(() => {
+            btn.innerText = "🔄 Reload Vision";
+            btn.style.background = "#374151";
+          }, 1500);
+        }
+      }, 400);
     }
 
     function recordDebugRect(x, y, w, h, kind, label) {

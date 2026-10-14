@@ -4,6 +4,8 @@ import time
 import mss
 import sys
 import ctypes
+import os
+import importlib
 from common import ensure_desktop_access, impersonate_interactive_user, revert_to_self
 
 try:
@@ -44,19 +46,72 @@ class ScreenCapturer:
 
         self.last_grid = None
         self.last_send_time = 0.0
+
+        # Hot-reload tracking for vision_framework.py
+        self.vision_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vision_framework.py")
+        self.reload_trigger_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".reload_vision")
+        self.last_vision_mtime = os.path.getmtime(self.vision_path) if os.path.exists(self.vision_path) else 0.0
+        self.last_reload_check = 0.0
+
         try:
-            from vision_framework import VisionHostPipeline
-            self.vision_pipeline = VisionHostPipeline()
-        except Exception:
+            import vision_framework
+            self.vision_pipeline = vision_framework.VisionHostPipeline()
+        except Exception as e:
+            logging.error(f"VisionHostPipeline init failed: {e}")
             self.vision_pipeline = None
 
         self._update_monitor()
+
+    def reload_vision_pipeline(self) -> bool:
+        """Dynamically reloads `vision_framework.py` in-memory without restarting the main process."""
+        try:
+            import vision_framework
+            importlib.reload(vision_framework)
+            self.vision_pipeline = vision_framework.VisionHostPipeline()
+            self.last_grid = None
+            if os.path.exists(self.vision_path):
+                self.last_vision_mtime = os.path.getmtime(self.vision_path)
+            logging.info("[HOT-RELOAD] 🚀 vision_framework.py successfully reloaded in-memory!")
+            return True
+        except Exception as e:
+            logging.error(f"[HOT-RELOAD] ❌ Failed to reload vision_framework: {e}")
+            return False
+
+    def check_hot_reload(self, now: float = 0.0):
+        """Checks every 0.8s if vision_framework.py was modified or if .reload_vision trigger exists."""
+        if now == 0.0:
+            now = time.time()
+        if now - self.last_reload_check < 0.8:
+            return
+        self.last_reload_check = now
+
+        # 1. Trigger file check (allows external scripts or non-admin shells to trigger reload instantly)
+        if os.path.exists(self.reload_trigger_path):
+            try:
+                os.remove(self.reload_trigger_path)
+            except Exception:
+                pass
+            self.reload_vision_pipeline()
+            return
+
+        # 2. File mtime auto-reload check
+        if os.path.exists(self.vision_path):
+            try:
+                mtime = os.path.getmtime(self.vision_path)
+                if self.last_vision_mtime and mtime > self.last_vision_mtime + 0.1:
+                    logging.info(f"[HOT-RELOAD] Detected modification on {self.vision_path} (mtime updated)")
+                    self.reload_vision_pipeline()
+            except Exception:
+                pass
 
     def reset_vision_state(self):
         if self.vision_pipeline is not None:
             self.vision_pipeline.reset()
 
     def notify_input(self, evt):
+        if evt.get("event") in ("reload_vision", "hot_reload"):
+            self.reload_vision_pipeline()
+            return
         if self.vision_pipeline is not None:
             self.vision_pipeline.notify_input(evt)
 
@@ -193,6 +248,7 @@ class ScreenCapturer:
     def capture_frame(self, draw_cursor=False, force=False):
         """Captures a live frame via DXGI GPU Duplication (with GDI fallback) and encodes via VisionHostPipeline."""
         now = time.time()
+        self.check_hot_reload(now)
         grabbed, from_dxgi_update = self._grab_frame_array(force=force, now=now)
         if grabbed is None:
             return None

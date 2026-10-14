@@ -469,6 +469,12 @@ class HostService:
                 )
                 self.force_frame = True
                 logging.info(f"Quality profile updated: scale={self.capturer.scale}, q={self.capturer.quality}")
+
+            elif msg_type == "reload_vision":
+                if hasattr(self.capturer, "reload_vision_pipeline"):
+                    self.capturer.reload_vision_pipeline()
+                self.force_frame = True
+                logging.info("Vision pipeline hot-reloaded via network control command.")
         except Exception as e:
             logging.warning(f"Error processing control input: {e}")
 
