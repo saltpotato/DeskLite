@@ -314,7 +314,11 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                     best_score = score
 
         # 3. Check vertical scrollbar strip (right edge) for offscreen content growth (DIRTY check)
-        slider_changed = self._check_scrollbar_dirty(prev_roi[:, inner_w:], curr_roi[:, inner_w:])
+        # Only check scrollbar slider if inner content is stationary. During window fades or active updates,
+        # the entire interior changes and this must NOT trigger a false scrollbar slider event.
+        inner_diff_sample = np.abs(prev_roi[:inner_h:4, :inner_w:4, :3].astype(np.int16) - curr_roi[:inner_h:4, :inner_w:4, :3].astype(np.int16)).max(axis=2)
+        inner_active = float((inner_diff_sample > 12).mean()) > 0.05
+        slider_changed = False if inner_active else self._check_scrollbar_dirty(prev_roi[:, inner_w:], curr_roi[:, inner_w:])
         if dy == 0 and dx == 0:
             if slider_changed:
                 ctx.shared["dirty_below"] = True
@@ -1230,29 +1234,59 @@ class VisionHostPipeline:
 
     @staticmethod
     def _refine_rect(prev_frame: np.ndarray, curr_frame: np.ndarray,
-                     rx1: int, ry1: int, rx2: int, ry2: int, fw: int, fh: int) -> tuple:
+                     rx1: int, ry1: int, rx2: int, ry2: int, fw: int, fh: int, thresh: int = 1) -> tuple:
         """Refines a coarse 4x4-grid bounding box to exact 1:1 boundaries of actual pixel changes
-        without artificial padding so window transforms and strips never shear or shift."""
-        rw = rx2 - rx1
-        rh = ry2 - ry1
-        if rw >= 180 and rh >= 120:
-            return (int(rx1), int(ry1), int(rw), int(rh))
+        without artificial padding or grid quantization truncation so window transforms and fades never shear."""
+        bx1 = max(0, rx1 - 4)
+        by1 = max(0, ry1 - 4)
+        bx2 = min(fw, rx2 + 4)
+        by2 = min(fh, ry2 + 4)
+        bw = bx2 - bx1
+        bh = by2 - by1
 
-        sx1, sy1 = max(0, rx1 - 4), max(0, ry1 - 4)
-        sx2, sy2 = min(fw, rx2 + 4), min(fh, ry2 + 4)
-        sub_p = prev_frame[sy1:sy2, sx1:sx2, :3]
-        sub_c = curr_frame[sy1:sy2, sx1:sx2, :3]
-        m = np.abs(sub_p.astype(np.int16) - sub_c.astype(np.int16)).max(axis=2) > 1
-        ys, xs = np.nonzero(m)
-        if ys.size == 0:
-            return (int(rx1), int(ry1), max(12, int(rw)), max(12, int(rh)))
-        px1 = sx1 + int(xs.min())
-        py1 = sy1 + int(ys.min())
-        px2 = sx1 + int(xs.max()) + 1
-        py2 = sy1 + int(ys.max()) + 1
-        w, h = max(12, px2 - px1), max(12, py2 - py1)
-        px2, py2 = min(fw, px1 + w), min(fh, py1 + h)
-        return (int(px1), int(py1), int(px2 - px1), int(py2 - py1))
+        if bw <= 48 and bh <= 48:
+            sub_p = prev_frame[by1:by2, bx1:bx2, :3]
+            sub_c = curr_frame[by1:by2, bx1:bx2, :3]
+            m = np.abs(sub_p.astype(np.int16) - sub_c.astype(np.int16)).max(axis=2) > thresh
+            ys, xs = np.nonzero(m)
+            if ys.size == 0:
+                return (int(rx1), int(ry1), max(4, int(rx2 - rx1)), max(4, int(ry2 - ry1)))
+            x1 = bx1 + int(xs.min())
+            y1 = by1 + int(ys.min())
+            x2 = bx1 + int(xs.max()) + 1
+            y2 = by1 + int(ys.max()) + 1
+            return (int(x1), int(y1), int(max(4, x2 - x1)), int(max(4, y2 - y1)))
+
+        # Fast 4-border refinement (<0.01ms): inspects only narrow strips around the 4 coarse grid boundaries
+        t_end = min(fh, by1 + 10)
+        top_p = prev_frame[by1:t_end, bx1:bx2, :3]
+        top_c = curr_frame[by1:t_end, bx1:bx2, :3]
+        top_diff = np.abs(top_p.astype(np.int16) - top_c.astype(np.int16)).max(axis=2) > thresh
+        t_ys, _ = np.nonzero(top_diff)
+        y1 = by1 + int(t_ys.min()) if t_ys.size > 0 else rx1
+
+        b_start = max(0, by2 - 10)
+        bot_p = prev_frame[b_start:by2, bx1:bx2, :3]
+        bot_c = curr_frame[b_start:by2, bx1:bx2, :3]
+        bot_diff = np.abs(bot_p.astype(np.int16) - bot_c.astype(np.int16)).max(axis=2) > thresh
+        b_ys, _ = np.nonzero(bot_diff)
+        y2 = b_start + int(b_ys.max()) + 1 if b_ys.size > 0 else ry2
+
+        l_end = min(fw, bx1 + 10)
+        left_p = prev_frame[by1:by2, bx1:l_end, :3]
+        left_c = curr_frame[by1:by2, bx1:l_end, :3]
+        left_diff = np.abs(left_p.astype(np.int16) - left_c.astype(np.int16)).max(axis=2) > thresh
+        _, l_xs = np.nonzero(left_diff)
+        x1 = bx1 + int(l_xs.min()) if l_xs.size > 0 else rx1
+
+        r_start = max(0, bx2 - 10)
+        right_p = prev_frame[by1:by2, r_start:bx2, :3]
+        right_c = curr_frame[by1:by2, r_start:bx2, :3]
+        right_diff = np.abs(right_p.astype(np.int16) - right_c.astype(np.int16)).max(axis=2) > thresh
+        _, r_xs = np.nonzero(right_diff)
+        x2 = r_start + int(r_xs.max()) + 1 if r_xs.size > 0 else rx2
+
+        return (int(x1), int(y1), int(max(4, x2 - x1)), int(max(4, y2 - y1)))
 
     @classmethod
     def _extract_dirty_rects(cls, prev_frame: np.ndarray, curr_frame: np.ndarray,
@@ -1372,11 +1406,11 @@ class VisionHostPipeline:
                     micro_count += 1
                     continue
 
-            # DENSE SURFACE FAST PATH (Videos / 3D Canvases / Heavy Animations):
-            # If not a scroll/window move, but dense (>= 35% dirty cells) and large (>= 200x150),
-            # do NOT fragment into 8 micro-islands! Slicing a dynamic video/canvas creates tearing
-            # and burns 5x CPU compressing 8 separate JPEGs. Encode directly as 1 cohesive patch:
-            if mw >= 200 and mh >= 150 and density >= 0.35:
+            # DENSE SURFACE FAST PATH (Videos / 3D Canvases / Window Fades / Dialogs):
+            # If not a scroll/window move, but dense (>= 25% dirty cells) and reasonably sized (>= 120x90),
+            # do NOT fragment into 8 micro-islands! Slicing a fading window/menu creates tearing
+            # and burns CPU compressing separate JPEGs. Encode directly as 1 cohesive patch:
+            if mw >= 120 and mh >= 90 and density >= 0.25:
                 patch = curr_frame[my:my + mh, mx:mx + mw]
                 jpeg_bytes = encode_jpeg_fn(patch, quality)
                 all_cmds.append(pack_jpeg_patch(mx, my, mw, mh, jpeg_bytes))
