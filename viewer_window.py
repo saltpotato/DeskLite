@@ -594,7 +594,7 @@ class RemoteDesktopViewer(QWidget):
                     qimg = QImage.fromData(frame_bytes)
                     if not qimg.isNull():
                         self.base_qimage = qimg
-                        self.vision_decoder.on_full_frame(len(frame_bytes), qimg.width(), qimg.height())
+                        self.vision_decoder.on_full_frame(len(frame_bytes), qimg.width(), qimg.height(), qimg)
 
             self.canvas.update()
 

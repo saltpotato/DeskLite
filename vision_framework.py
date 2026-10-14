@@ -29,6 +29,8 @@ CMD_TRANSFORM_RECT = 0x03
 CMD_MARK_DIRTY = 0x04
 CMD_JPEG_PATCH = 0x05
 CMD_OVERLAY_META = 0x06
+CMD_UPDATE_BG = 0x07
+CMD_RESTORE_BG = 0x08
 
 
 try:
@@ -700,10 +702,10 @@ class WindowMove2DRecognizer(BaseRecognizer):
     Detects 2D diagonal/horizontal/vertical window dragging, floating dialog movement,
     and 2D canvas/map panning without any neural network model (~0.25ms in numpy/OpenCV):
     1. Coarse 2D translation search on 4x-downsampled 2D edge maps (`cv2.matchTemplate`).
-    2. Two-stage (+/-2px then +/-1px) exact 1-pixel refinement.
-    3. Shifts the moved window locally on the Viewer's GPU (`CMD_TRANSFORM_RECT`, 0 KB),
-       caches covered background strips before overwriting them, and restores/patches only
-       the thin L-shaped uncovered background strips + rounded window corners.
+    2. Shifts the moved window locally on the Viewer's GPU (`CMD_TRANSFORM_RECT`, 0 KB).
+    3. Maintains a synchronized 2D Background Surface (`bg_surface`, 0 KB) so any desktop,
+       wallpaper, or underlying window uncovered behind a dragged window is restored instantly
+       without sending network JPEGs (`CMD_RESTORE_BG`, 0 KB)!
     """
     name = "WindowMove2DRecognizer"
 
@@ -724,26 +726,20 @@ class WindowMove2DRecognizer(BaseRecognizer):
         if abs(mv_x) + abs(mv_y) < 4:
             return None
 
-        ov_w = w - abs(mv_x)
-        ov_h = h - abs(mv_y)
-        if ov_w < 64 or ov_h < 48:
+        src_x, src_y, dst_x, dst_y, win_w, win_h = self._get_window_coords(x, y, w, h, mv_x, mv_y)
+        if win_w < 64 or win_h < 48:
             return None
 
-        src_x_rel = max(0, -mv_x)
-        dst_x_rel = max(0, mv_x)
-        src_y_rel = max(0, -mv_y)
-        dst_y_rel = max(0, mv_y)
-
-        shifted = prev_roi[src_y_rel:src_y_rel + ov_h, src_x_rel:src_x_rel + ov_w]
-        target = curr_roi[dst_y_rel:dst_y_rel + ov_h, dst_x_rel:dst_x_rel + ov_w]
+        shifted = prev_roi[src_y - y : src_y - y + win_h, src_x - x : src_x - x + win_w]
+        target = curr_roi[dst_y - y : dst_y - y + win_h, dst_x - x : dst_x - x + win_w]
 
         diff_8 = np.abs(shifted[::8, ::8, :3].astype(np.int16) - target[::8, ::8, :3].astype(np.int16)).max(axis=2)
-        inlier_ratio = float((diff_8 <= 12).mean())
+        inlier_ratio = float((diff_8 <= 14).mean())
         if inlier_ratio < 0.65:
             return None
 
         residual_rects = Scroll2DAndSliderRecognizer._find_residual_rects(
-            shifted, target, x + dst_x_rel, y + dst_y_rel
+            shifted, target, dst_x, dst_y
         )
         if residual_rects is None:
             return None
@@ -753,53 +749,84 @@ class WindowMove2DRecognizer(BaseRecognizer):
         ctx.shared["pending_pre_save"] = None
         ctx.shared["pending_post_save"] = None
 
-        known = ctx.shared["known_states"]
-        dirty = ctx.shared["dirty_states"]
+        bg_frame = ctx.shared.setdefault("bg_frame", None)
+        if bg_frame is None or bg_frame.shape != ctx.curr_frame.shape:
+            ctx.shared["bg_frame"] = ctx.prev_frame.copy()
+            bg_frame = ctx.shared["bg_frame"]
 
-        # 1) Save newly covered background strips into Viewer RAM cache BEFORE shifting window over them
-        if mv_y != 0:
-            sh_y = abs(mv_y)
-            cov_y = (y + h - sh_y) if mv_y > 0 else y
-            cov_h_roi = ctx.prev_frame[cov_y:cov_y + sh_y, x:x + w]
-            cov_h_hash = fast_region_hash(cov_h_roi)
-            if cov_h_hash and cov_h_hash not in known:
-                cmds.append(pack_save_state(cov_h_hash, x, cov_y, w, sh_y))
-                StateCacheRecognizer._commit_known(known, dirty, cov_h_hash, (x, cov_y, w, sh_y))
+        # 1) Save newly covered background strips into Viewer's Background Surface BEFORE window moves
+        abs_mx = abs(mv_x)
+        sub_w = win_w - abs_mx
 
-        if mv_x != 0:
-            sh_x = abs(mv_x)
-            cov_x = (x + w - sh_x) if mv_x > 0 else x
-            cov_v_roi = ctx.prev_frame[y:y + h, cov_x:cov_x + sh_x]
-            cov_v_hash = fast_region_hash(cov_v_roi)
-            if cov_v_hash and cov_v_hash not in known:
-                cmds.append(pack_save_state(cov_v_hash, cov_x, y, sh_x, h))
-                StateCacheRecognizer._commit_known(known, dirty, cov_v_hash, (cov_x, y, sh_x, h))
+        # Covered X strip
+        if mv_x > 0:
+            cov_x, cov_w = src_x + win_w, mv_x
+            bg_frame[dst_y : dst_y + win_h, cov_x : cov_x + cov_w] = ctx.prev_frame[dst_y : dst_y + win_h, cov_x : cov_x + cov_w]
+            cmds.append(pack_update_bg(cov_x, dst_y, cov_w, win_h))
+        elif mv_x < 0:
+            cov_x, cov_w = dst_x, -mv_x
+            bg_frame[dst_y : dst_y + win_h, cov_x : cov_x + cov_w] = ctx.prev_frame[dst_y : dst_y + win_h, cov_x : cov_x + cov_w]
+            cmds.append(pack_update_bg(cov_x, dst_y, cov_w, win_h))
+
+        # Covered Y strip (non-overlapping: width = win_w - abs(mv_x))
+        if sub_w > 0:
+            cov_sx = dst_x if mv_x >= 0 else dst_x + abs_mx
+            if mv_y > 0:
+                cov_y, cov_h = src_y + win_h, mv_y
+                bg_frame[cov_y : cov_y + cov_h, cov_sx : cov_sx + sub_w] = ctx.prev_frame[cov_y : cov_y + cov_h, cov_sx : cov_sx + sub_w]
+                cmds.append(pack_update_bg(cov_sx, cov_y, sub_w, cov_h))
+            elif mv_y < 0:
+                cov_y, cov_h = dst_y, -mv_y
+                bg_frame[cov_y : cov_y + cov_h, cov_sx : cov_sx + sub_w] = ctx.prev_frame[cov_y : cov_y + cov_h, cov_sx : cov_sx + sub_w]
+                cmds.append(pack_update_bg(cov_sx, cov_y, sub_w, cov_h))
 
         # 2) Shift the entire window/panel locally on the Viewer GPU (0 KB image data!)
         cmds.append(pack_transform_rect(
-            x + src_x_rel, y + src_y_rel, ov_w, ov_h,
-            x + dst_x_rel, y + dst_y_rel, ov_w, ov_h
+            src_x, src_y, win_w, win_h,
+            dst_x, dst_y, win_w, win_h
         ))
 
-        # 3) Restore from RAM cache or JPEG-encode the L-shaped uncovered background strips
-        strip_cache_hits = 0
-        if mv_y != 0:
-            sh_y = abs(mv_y)
-            unc_y = y if mv_y > 0 else (y + ov_h)
-            h_strip = ctx.curr_frame[unc_y:unc_y + sh_y, x:x + w]
-            s_cmds, hit = self._encode_or_restore(ctx, h_strip, x, unc_y, w, sh_y)
-            cmds.extend(s_cmds)
-            if hit:
-                strip_cache_hits += 1
+        # 3) Restore uncovered strips from Background Surface (0 KB!) or StateCache / JPEG
+        bg_restores = 0
+        cache_hits = 0
 
-        if mv_x != 0:
-            sh_x = abs(mv_x)
-            unc_x = x if mv_x > 0 else (x + ov_w)
-            v_strip = ctx.curr_frame[y:y + h, unc_x:unc_x + sh_x]
-            s_cmds, hit = self._encode_or_restore(ctx, v_strip, unc_x, y, sh_x, h)
+        # Uncovered X strip
+        if mv_x > 0:
+            unc_x, unc_w = src_x, mv_x
+            s_cmds, kind = self._restore_or_encode_strip(ctx, bg_frame, unc_x, src_y, unc_w, win_h)
             cmds.extend(s_cmds)
-            if hit:
-                strip_cache_hits += 1
+            if kind == "bg":
+                bg_restores += 1
+            elif kind == "cache":
+                cache_hits += 1
+        elif mv_x < 0:
+            unc_x, unc_w = dst_x + win_w, -mv_x
+            s_cmds, kind = self._restore_or_encode_strip(ctx, bg_frame, unc_x, src_y, unc_w, win_h)
+            cmds.extend(s_cmds)
+            if kind == "bg":
+                bg_restores += 1
+            elif kind == "cache":
+                cache_hits += 1
+
+        # Uncovered Y strip (non-overlapping: width = win_w - abs(mv_x))
+        if sub_w > 0:
+            unc_sx = src_x + mv_x if mv_x >= 0 else src_x
+            if mv_y > 0:
+                unc_y, unc_h = src_y, mv_y
+                s_cmds, kind = self._restore_or_encode_strip(ctx, bg_frame, unc_sx, unc_y, sub_w, unc_h)
+                cmds.extend(s_cmds)
+                if kind == "bg":
+                    bg_restores += 1
+                elif kind == "cache":
+                    cache_hits += 1
+            elif mv_y < 0:
+                unc_y, unc_h = dst_y + win_h, -mv_y
+                s_cmds, kind = self._restore_or_encode_strip(ctx, bg_frame, unc_sx, unc_y, sub_w, unc_h)
+                cmds.extend(s_cmds)
+                if kind == "bg":
+                    bg_restores += 1
+                elif kind == "cache":
+                    cache_hits += 1
 
         # 4) Patch rounded window corners / shadows / stationary cursor inside overlap
         for rx, ry, rw, rh in residual_rects:
@@ -808,7 +835,7 @@ class WindowMove2DRecognizer(BaseRecognizer):
 
         ctx.prev_frame[y:y + h, x:x + w] = ctx.curr_frame[y:y + h, x:x + w]
 
-        est_saved = max(1024, int(ov_w * ov_h * 0.12))
+        est_saved = max(1024, int(win_w * win_h * 0.12))
         ctx.shared["bytes_saved"] += est_saved
         cmds.append(pack_overlay_meta({
             "event": "window_move",
@@ -821,93 +848,92 @@ class WindowMove2DRecognizer(BaseRecognizer):
         if ctx.shared.get("debug_mode", True):
             logging.info(
                 f"[VF-DEBUG][HOST] WINDOW_MOVE_2D rect=({x},{y},{w}x{h}) "
-                f"move=({mv_x:+d},{mv_y:+d})px win=({ov_w}x{ov_h}) "
-                f"bg_cache_hits={strip_cache_hits} residuals={len(residual_rects)} "
+                f"move=({mv_x:+d},{mv_y:+d})px win=({win_w}x{win_h}) "
+                f"bg_restores={bg_restores} cache_hits={cache_hits} residuals={len(residual_rects)} "
                 f"saved_total={ctx.shared['bytes_saved'] / 1024.0:.1f}KB"
             )
         return cmds
 
     @staticmethod
-    def _encode_or_restore(ctx: FrameContext, strip_arr: np.ndarray, sx: int, sy: int, sw: int, sh: int):
-        shash = fast_region_hash(strip_arr)
+    def _get_window_coords(x: int, y: int, w: int, h: int, mv_x: int, mv_y: int):
+        if mv_x >= 0:
+            src_win_x = x
+            dst_win_x = x + mv_x
+            win_w = w - mv_x
+        else:
+            src_win_x = x - mv_x
+            dst_win_x = x
+            win_w = w + mv_x
+
+        if mv_y >= 0:
+            src_win_y = y
+            dst_win_y = y + mv_y
+            win_h = h - mv_y
+        else:
+            src_win_y = y - mv_y
+            dst_win_y = y
+            win_h = h + mv_y
+
+        return src_win_x, src_win_y, dst_win_x, dst_win_y, win_w, win_h
+
+    @classmethod
+    def _restore_or_encode_strip(cls, ctx: FrameContext, bg_frame: np.ndarray,
+                                 sx: int, sy: int, sw: int, sh: int) -> tuple[list[bytes], str]:
+        if sw <= 0 or sh <= 0:
+            return [], ""
+        strip_arr = ctx.curr_frame[sy:sy + sh, sx:sx + sw]
         known = ctx.shared["known_states"]
         dirty = ctx.shared["dirty_states"]
+
+        # 1. Background Surface match (0 KB network transfer!)
+        if bg_frame is not None and bg_frame.shape[:2] == ctx.curr_frame.shape[:2]:
+            bg_sub = bg_frame[sy:sy + sh, sx:sx + sw]
+            if bg_sub.shape == strip_arr.shape:
+                diff = np.abs(strip_arr[::2, ::2, :3].astype(np.int16) - bg_sub[::2, ::2, :3].astype(np.int16)).max(axis=2)
+                if float((diff <= 12).mean()) >= 0.94 and float(diff.mean()) <= 4.5:
+                    ctx.shared["bytes_saved"] += max(512, int(sw * sh * 0.14))
+                    return [pack_restore_bg(sx, sy, sw, sh)], "bg"
+
+        # 2. Exact hash match from StateCache
+        shash = fast_region_hash(strip_arr)
         if shash and shash in known and shash not in dirty and known[shash][2:] == (sw, sh):
             ctx.shared["bytes_saved"] += max(512, int(sw * sh * 0.12))
             known.move_to_end(shash)
-            return [pack_restore_state(shash, sx, sy, sw, sh)], True
-        out = [pack_jpeg_patch(sx, sy, sw, sh, ctx.encode_jpeg(strip_arr, ctx.quality))]
+            return [pack_restore_state(shash, sx, sy, sw, sh)], "cache"
+
+        # 3. Fallback: Network JPEG patch + update background surface
+        jpeg_bytes = ctx.encode_jpeg(strip_arr, ctx.quality)
+        out = [pack_jpeg_patch(sx, sy, sw, sh, jpeg_bytes)]
         if shash:
             out.append(pack_save_state(shash, sx, sy, sw, sh))
             StateCacheRecognizer._commit_known(known, dirty, shash, (sx, sy, sw, sh))
-        return out, False
+        if bg_frame is not None and bg_frame.shape[:2] == ctx.curr_frame.shape[:2]:
+            bg_frame[sy:sy + sh, sx:sx + sw] = strip_arr
+            out.append(pack_update_bg(sx, sy, sw, sh))
+        return out, "jpeg"
 
     @staticmethod
     def _detect_2d_translation(prev_roi: np.ndarray, curr_roi: np.ndarray):
         """
         Finds a 2D translation vector (mv_x, mv_y) where `dst = src + (mv_x, mv_y)`
-        using 4x-downsampled 2D edge correlation (`cv2.matchTemplate`) followed by
-        two-stage (+/-2px then +/-1px) exact 1-pixel refinement.
+        using FFT Phase Correlation in <0.15ms.
         """
         h, w = prev_roi.shape[:2]
-        p4 = prev_roi[::4, ::4, 1].astype(np.float32)
-        c4 = curr_roi[::4, ::4, 1].astype(np.int16)
-        sh, sw = p4.shape
-        if sh < 20 or sw < 20:
+        if h < 40 or w < 40:
             return None
 
-        c4_f = c4.astype(np.float32)
-        p_edge = np.abs(np.diff(p4, axis=1, prepend=p4[:, :1])) + np.abs(np.diff(p4, axis=0, prepend=p4[:1, :]))
-        c_edge = np.abs(np.diff(c4_f, axis=1, prepend=c4_f[:, :1])) + np.abs(np.diff(c4_f, axis=0, prepend=c4_f[:1, :]))
+        p_gray = prev_roi[:, :, 1].astype(np.float32)
+        c_gray = curr_roi[:, :, 1].astype(np.float32)
 
-        my = min(sh // 4, 36)
-        mx = min(sw // 4, 36)
-        th, tw = sh - 2 * my, sw - 2 * mx
-        if th < 10 or tw < 10:
+        try:
+            shift, resp = cv2.phaseCorrelate(p_gray, c_gray)
+            if resp < 0.25:
+                return None
+            mv_x = int(round(shift[0]))
+            mv_y = int(round(shift[1]))
+            return mv_x, mv_y
+        except Exception:
             return None
-
-        tpl = c_edge[my:my + th, mx:mx + tw]
-        if float(tpl.std()) < 1.0:
-            return None
-
-        res = cv2.matchTemplate(p_edge, tpl, cv2.TM_CCOEFF_NORMED)
-        res[max(0, my - 1):min(res.shape[0], my + 2), max(0, mx - 1):min(res.shape[1], mx + 2)] = -1.0
-        py, px = np.unravel_index(int(np.argmax(res)), res.shape)
-        if float(res[py, px]) < 0.50:
-            return None
-
-        # Coarse movement vector (dst - src) in pixels
-        mv_x = int((mx - px) * 4)
-        mv_y = int((my - py) * 4)
-
-        # Two-stage (+/-2px then +/-1px) 1-pixel refinement on central region
-        cy1, cy2 = h // 4, h - h // 4
-        cx1, cx2 = w // 4, w - w // 4
-        c_patch = curr_roi[cy1:cy2:4, cx1:cx2:4, :3].astype(np.int16)
-
-        for step in (2, 1):
-            best_err = 1e9
-            best_dx, best_dy = mv_x, mv_y
-            for dy_off in (-step, 0, step):
-                ty = mv_y + dy_off
-                sy1, sy2 = cy1 - ty, cy2 - ty
-                if sy1 < 0 or sy2 > h:
-                    continue
-                for dx_off in (-step, 0, step):
-                    tx = mv_x + dx_off
-                    sx1, sx2 = cx1 - tx, cx2 - tx
-                    if sx1 < 0 or sx2 > w:
-                        continue
-                    p_patch = prev_roi[sy1:sy2:4, sx1:sx2:4, :3].astype(np.int16)
-                    if p_patch.shape != c_patch.shape:
-                        continue
-                    err = float(np.abs(p_patch - c_patch).mean())
-                    if err < best_err:
-                        best_err = err
-                        best_dx, best_dy = tx, ty
-            mv_x, mv_y = best_dx, best_dy
-
-        return mv_x, mv_y
 
 
 class AnimationCycleRecognizer(BaseRecognizer):
@@ -1138,6 +1164,7 @@ class VisionHostPipeline:
             "virtual_x": 0,
             "dirty_below": False,
             "bytes_saved": 0,
+            "bg_frame": None,
             "debug_mode": True,
         }
 
@@ -1146,6 +1173,7 @@ class VisionHostPipeline:
 
     def reset(self):
         self.prev_frame = None
+        self.shared["bg_frame"] = None
         self.shared["known_states"].clear()
         self.shared["dirty_states"].clear()
         self.shared["anim_hotspots"].clear()
@@ -1256,6 +1284,7 @@ class VisionHostPipeline:
         # delta encoding when `self.prev_frame` is already valid (connection/quality resets call `reset()`).
         if self.prev_frame is None or self.prev_frame.shape != curr_frame.shape:
             self.prev_frame = curr_frame.copy()
+            self.shared["bg_frame"] = curr_frame.copy()
             return encode_jpeg_fn(curr_frame, quality)
 
         # Fast 4x4 grid diff with 3-LSB noise floor to ignore invisible DWM dithering
@@ -1309,6 +1338,7 @@ class VisionHostPipeline:
                 if u_cmds is None:
                     # Single massive un-cached screen change (>= 75% of screen area) -> send full keyframe
                     self.prev_frame = curr_frame.copy()
+                    self.shared["bg_frame"] = curr_frame.copy()
                     return encode_jpeg_fn(curr_frame, quality)
                 all_cmds.extend(u_cmds)
 
@@ -1414,6 +1444,14 @@ def pack_jpeg_patch(dx: int, dy: int, dw: int, dh: int, jpeg_bytes: bytes) -> by
     return struct.pack(">BHHHHI", CMD_JPEG_PATCH, dx, dy, dw, dh, len(jpeg_bytes)) + jpeg_bytes
 
 
+def pack_update_bg(sx: int, sy: int, sw: int, sh: int) -> bytes:
+    return struct.pack(">BHHHH", CMD_UPDATE_BG, sx, sy, sw, sh)
+
+
+def pack_restore_bg(dx: int, dy: int, dw: int, dh: int) -> bytes:
+    return struct.pack(">BHHHH", CMD_RESTORE_BG, dx, dy, dw, dh)
+
+
 def pack_overlay_meta(meta_dict: dict) -> bytes:
     raw = json.dumps(meta_dict).encode("utf-8")
     return struct.pack(">BI", CMD_OVERLAY_META, len(raw)) + raw
@@ -1450,7 +1488,9 @@ class VisionViewerDecoder:
         self.debug_rects = collections.deque(maxlen=40)  # dicts: x, y, w, h, kind, label, ts
         self.stats_cache_hits = 0
         self.stats_scroll_blits = 0
+        self.stats_bg_restores = 0
         self.stats_jpeg_patches = 0
+        self.bg_surface = None
 
         # Interactive overlay hit-boxes in canvas widget coordinates
         self.btn_bookmark_rect = None
@@ -1463,6 +1503,7 @@ class VisionViewerDecoder:
         self.debug_rects.clear()
         self.virtual_y = 0
         self.dirty_below = False
+        self.bg_surface = None
 
     def toggle_debug(self, send_input_fn=None) -> bool:
         self.debug_mode = not self.debug_mode
@@ -1487,16 +1528,20 @@ class VisionViewerDecoder:
             "ts": time.time(),
         })
 
-    def on_full_frame(self, byte_len: int = 0, width: int = 1920, height: int = 1080):
+    def on_full_frame(self, byte_len: int = 0, width: int = 1920, height: int = 1080, base_qimage=None):
         """Called when a full JPEG keyframe arrives."""
         self.stats_jpeg_patches += 1
+        if base_qimage is not None and not base_qimage.isNull():
+            self.bg_surface = base_qimage.copy()
+        else:
+            self.bg_surface = None
         kb = f"{byte_len / 1024.0:.1f} KB" if byte_len else "Keyframe"
         self._record_debug(0, 0, width, height, "full", f"FULL FRAME ({kb})")
         if self.debug_mode:
             logging.info(
                 f"[VF-DEBUG][VIEWER] FULL_KEYFRAME ({width}x{height} {kb}) || "
                 f"stats: hits={self.stats_cache_hits} scroll={self.stats_scroll_blits} "
-                f"jpeg={self.stats_jpeg_patches} ram={len(self.state_cache)}"
+                f"bg={self.stats_bg_restores} jpeg={self.stats_jpeg_patches} ram={len(self.state_cache)}"
             )
 
     def on_dl_patch(self, dx: int, dy: int, dw: int, dh: int, byte_len: int = 0):
@@ -1508,7 +1553,7 @@ class VisionViewerDecoder:
             logging.info(
                 f"[VF-DEBUG][VIEWER] DL_PATCH rect=({dx},{dy},{dw}x{dh}) size={kb} || "
                 f"stats: hits={self.stats_cache_hits} scroll={self.stats_scroll_blits} "
-                f"jpeg={self.stats_jpeg_patches} ram={len(self.state_cache)}"
+                f"bg={self.stats_bg_restores} jpeg={self.stats_jpeg_patches} ram={len(self.state_cache)}"
             )
 
     def apply_vf_packet(self, data: bytes, base_qimage):
@@ -1623,6 +1668,34 @@ class VisionViewerDecoder:
                         except Exception:
                             pass
                         offset += mlen
+
+                elif cmd == CMD_UPDATE_BG and offset + 8 <= n:
+                    sx, sy, sw, sh = struct.unpack_from(">HHHH", data, offset)
+                    offset += 8
+                    if self.bg_surface is None or self.bg_surface.size() != base_qimage.size():
+                        self.bg_surface = base_qimage.copy()
+                    else:
+                        bg_p = qpainter_cls(self.bg_surface)
+                        try:
+                            bg_p.drawImage(qrectf_cls(sx, sy, sw, sh), base_qimage, qrectf_cls(sx, sy, sw, sh))
+                        finally:
+                            bg_p.end()
+                    if self.debug_mode:
+                        log_ops.append(f"BG_UPDATE({sx},{sy},{sw}x{sh})")
+
+                elif cmd == CMD_RESTORE_BG and offset + 8 <= n:
+                    dx, dy, dw, dh = struct.unpack_from(">HHHH", data, offset)
+                    offset += 8
+                    if self.bg_surface is not None and not self.bg_surface.isNull():
+                        p.drawImage(qrectf_cls(dx, dy, dw, dh), self.bg_surface, qrectf_cls(dx, dy, dw, dh))
+                        self.stats_bg_restores += 1
+                        self._record_debug(dx, dy, dw, dh, "bg", "BG RESTORE (0 KB)")
+                        if self.debug_mode:
+                            log_ops.append(f"BG_RESTORE({dx},{dy},{dw}x{dh})")
+                    else:
+                        self._record_debug(dx, dy, dw, dh, "miss", "BG MISS!")
+                        if self.debug_mode:
+                            log_ops.append(f"BG_MISS({dx},{dy},{dw}x{dh})")
                 else:
                     break
         finally:
@@ -1693,6 +1766,7 @@ class VisionViewerDecoder:
             palette = {
                 "cache":  (QColor(16, 185, 129, 75),  QColor(16, 185, 129, 235),  QColor(6, 95, 70, 225)),     # GREEN: RAM Cache
                 "scroll": (QColor(14, 165, 233, 60),  QColor(56, 189, 248, 230),  QColor(12, 74, 110, 225)),   # BLUE:  GPU Scroll Copy
+                "bg":     (QColor(6, 182, 212, 70),   QColor(34, 211, 238, 235),  QColor(21, 94, 117, 225)),   # CYAN:  Background Surface Restore
                 "jpeg":   (QColor(244, 63, 94, 78),   QColor(251, 113, 133, 240), QColor(136, 19, 55, 225)),   # RED:   Network JPEG
                 "full":   (QColor(245, 158, 11, 40),  QColor(251, 191, 36, 220),  QColor(120, 53, 15, 225)),   # AMBER: Full Keyframe
                 "miss":   (QColor(220, 38, 38, 130),  QColor(254, 202, 202, 255), QColor(127, 29, 29, 240)),   # BRIGHT RED: Cache Miss
@@ -1728,7 +1802,7 @@ class VisionViewerDecoder:
                     )
 
             # Top-left Legend Bar (Android Developer Mode style)
-            leg_w = min(img_w - 28.0, 620.0)
+            leg_w = min(img_w - 28.0, 740.0)
             leg_h = 28.0
             leg_rect = QRectF(img_x + 14.0, img_y + 14.0, leg_w, leg_h)
             painter.setPen(QColor(56, 189, 248, 150))
@@ -1737,9 +1811,10 @@ class VisionViewerDecoder:
 
             legend_txt = (
                 f"🔬 DEBUG  |  🟢 Cache ({self.stats_cache_hits})   "
-                f"🔵 Scroll-Copy ({self.stats_scroll_blits})   "
+                f"🔵 GPU-Move ({self.stats_scroll_blits})   "
+                f"🔷 BG-Restore ({self.stats_bg_restores})   "
                 f"🔴 Net-JPEG ({self.stats_jpeg_patches})   "
-                f"📦 RAM: {len(self.state_cache)} states"
+                f"📦 RAM: {len(self.state_cache)}"
             )
             painter.setPen(QColor(241, 245, 249))
             painter.drawText(

@@ -240,7 +240,7 @@
     let debugCtx = debugCanvas.getContext("2d");
     let visionDebugMode = true;
     let debugRects = [];
-    let debugStats = { cache: 0, scroll: 0, jpeg: 0 };
+    let debugStats = { cache: 0, scroll: 0, bg: 0, jpeg: 0 };
     let statusText = document.getElementById("statusText");
     let badge = document.getElementById("badge");
     let btnConnect = document.getElementById("btnConnect");
@@ -519,6 +519,7 @@
       const palette = {
         cache:  { fill: "rgba(16, 185, 129, 0.28)", stroke: "#10b981", tag: "rgba(6, 95, 70, 0.9)" },
         scroll: { fill: "rgba(14, 165, 233, 0.24)", stroke: "#38bdf8", tag: "rgba(12, 74, 110, 0.9)" },
+        bg:     { fill: "rgba(6, 182, 212, 0.28)",  stroke: "#22d3ee", tag: "rgba(21, 94, 117, 0.9)" },
         jpeg:   { fill: "rgba(244, 63, 94, 0.30)",  stroke: "#fb7185", tag: "rgba(136, 19, 55, 0.9)" },
         full:   { fill: "rgba(245, 158, 11, 0.16)", stroke: "#fbbf24", tag: "rgba(120, 53, 15, 0.9)" }
       };
@@ -540,12 +541,12 @@
       }
       // Top-left Legend Bar
       debugCtx.fillStyle = "rgba(15, 23, 42, 0.88)";
-      debugCtx.fillRect(14, 14, 590, 30);
+      debugCtx.fillRect(14, 14, 710, 30);
       debugCtx.strokeStyle = "rgba(56, 189, 248, 0.6)";
-      debugCtx.strokeRect(14, 14, 590, 30);
+      debugCtx.strokeRect(14, 14, 710, 30);
       debugCtx.fillStyle = "#f1f5f9";
       debugCtx.fillText(
-        `🔬 DEBUG  |  🟢 Cache (${debugStats.cache})   🔵 Scroll-Copy (${debugStats.scroll})   🔴 Net-JPEG (${debugStats.jpeg})`,
+        `🔬 DEBUG  |  🟢 Cache (${debugStats.cache})   🔵 GPU-Move (${debugStats.scroll})   🔷 BG-Restore (${debugStats.bg})   🔴 Net-JPEG (${debugStats.jpeg})`,
         26, 34
       );
     }
@@ -648,6 +649,8 @@
       const vfStateCache = new Map();
       const vfScratchCanvas = document.createElement("canvas");
       const vfScratchCtx = vfScratchCanvas.getContext("2d");
+      const vfBgCanvas = document.createElement("canvas");
+      const vfBgCtx = vfBgCanvas.getContext("2d");
 
       function enqueueCompleteFrame(buf) {
         const u8 = new Uint8Array(buf, 0, 2);
@@ -760,16 +763,43 @@
           } else if (cmd === 0x06 && offset + 5 <= buf.byteLength) {
             // CMD_OVERLAY_META
             const mlen = view.getUint32(offset + 1, false);
-            if (offset + 5 + mlen <= buf.byteLength && debugMode && debugRects.length > 0) {
+            if (offset + 5 + mlen <= buf.byteLength && visionDebugMode && debugRects.length > 0) {
               try {
                 const txt = new TextDecoder().decode(new Uint8Array(buf, offset + 5, mlen));
                 if (txt.includes('"anim_cycle"')) {
                   debugRects[debugRects.length - 1].label = "ANIM LOOP (0 KB)";
-                  drawDebugOverlay();
+                  renderDebugOverlay();
                 }
               } catch (e) {}
             }
             offset += 5 + mlen;
+          } else if (cmd === 0x07 && offset + 9 <= buf.byteLength) {
+            // CMD_UPDATE_BG
+            const sx = view.getUint16(offset + 1, false);
+            const sy = view.getUint16(offset + 3, false);
+            const sw = view.getUint16(offset + 5, false);
+            const sh = view.getUint16(offset + 7, false);
+            offset += 9;
+            if (sw > 0 && sh > 0) {
+              if (vfBgCanvas.width !== canvas.width || vfBgCanvas.height !== canvas.height) {
+                vfBgCanvas.width = canvas.width;
+                vfBgCanvas.height = canvas.height;
+                vfBgCtx.drawImage(canvas, 0, 0);
+              }
+              vfBgCtx.drawImage(canvas, sx, sy, sw, sh, sx, sy, sw, sh);
+            }
+          } else if (cmd === 0x08 && offset + 9 <= buf.byteLength) {
+            // CMD_RESTORE_BG
+            const dx = view.getUint16(offset + 1, false);
+            const dy = view.getUint16(offset + 3, false);
+            const dw = view.getUint16(offset + 5, false);
+            const dh = view.getUint16(offset + 7, false);
+            offset += 9;
+            if (dw > 0 && dh > 0 && vfBgCanvas.width > 0 && vfBgCanvas.height > 0) {
+              ctx.drawImage(vfBgCanvas, dx, dy, dw, dh, dx, dy, dw, dh);
+              debugStats.bg++;
+              recordDebugRect(dx, dy, dw, dh, "bg", "BG RESTORE (0 KB)");
+            }
           } else {
             break;
           }
@@ -806,6 +836,9 @@
                 canvas.height = bmp.height;
               }
               ctx.drawImage(bmp, 0, 0);
+              vfBgCanvas.width = bmp.width;
+              vfBgCanvas.height = bmp.height;
+              vfBgCtx.drawImage(bmp, 0, 0);
               debugStats.jpeg++;
               recordDebugRect(0, 0, bmp.width, bmp.height, "full", `FULL FRAME (${(buf.byteLength / 1024).toFixed(1)} KB)`);
               bmp.close();
