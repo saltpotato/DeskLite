@@ -83,6 +83,9 @@
       object-fit: contain;
       cursor: default;
       display: block;
+      image-rendering: -webkit-optimize-contrast;
+      image-rendering: crisp-edges;
+      image-rendering: pixelated;
     }
     .badge {
       display: inline-block;
@@ -236,8 +239,10 @@
     let shouldReconnect = false;
     let canvas = document.getElementById("screenCanvas");
     let ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = false;
     let debugCanvas = document.getElementById("debugCanvas");
     let debugCtx = debugCanvas.getContext("2d");
+    debugCtx.imageSmoothingEnabled = false;
     let visionDebugMode = false;
     let debugRects = [];
     let debugStats = { cache: 0, scroll: 0, bg: 0, jpeg: 0 };
@@ -649,8 +654,10 @@
       const vfStateCache = new Map();
       const vfScratchCanvas = document.createElement("canvas");
       const vfScratchCtx = vfScratchCanvas.getContext("2d");
+      vfScratchCtx.imageSmoothingEnabled = false;
       const vfBgCanvas = document.createElement("canvas");
       const vfBgCtx = vfBgCanvas.getContext("2d");
+      vfBgCtx.imageSmoothingEnabled = false;
 
       function enqueueCompleteFrame(buf) {
         const u8 = new Uint8Array(buf, 0, 2);
@@ -673,21 +680,23 @@
         for (let i = 0; i < count && offset < buf.byteLength; i++) {
           const cmd = view.getUint8(offset);
           if (cmd === 0x01 && offset + 17 <= buf.byteLength) {
-            // CMD_SAVE_STATE
+            // CMD_SAVE_STATE (Only cache compact UI components <= 800x600, never giant viewports)
             const sid = view.getBigUint64(offset + 1, false).toString();
             const sx = view.getUint16(offset + 9, false);
             const sy = view.getUint16(offset + 11, false);
             const sw = view.getUint16(offset + 13, false);
             const sh = view.getUint16(offset + 15, false);
             offset += 17;
-            if (sw > 0 && sh > 0) {
+            if (sw > 0 && sh > 0 && sw <= 800 && sh <= 600) {
               const c = document.createElement("canvas");
               c.width = sw;
               c.height = sh;
-              c.getContext("2d").drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+              const cCtx = c.getContext("2d");
+              cCtx.imageSmoothingEnabled = false;
+              cCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
               vfStateCache.delete(sid);
               vfStateCache.set(sid, c);
-              while (vfStateCache.size > 256) {
+              while (vfStateCache.size > 48) {
                 const firstKey = vfStateCache.keys().next().value;
                 vfStateCache.delete(firstKey);
               }
@@ -723,6 +732,7 @@
               if (vfScratchCanvas.width < sw || vfScratchCanvas.height < sh) {
                 vfScratchCanvas.width = Math.max(vfScratchCanvas.width, sw);
                 vfScratchCanvas.height = Math.max(vfScratchCanvas.height, sh);
+                vfScratchCtx.imageSmoothingEnabled = false;
               }
               vfScratchCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
               ctx.drawImage(vfScratchCanvas, 0, 0, sw, sh, dx, dy, dw, dh);
@@ -751,7 +761,7 @@
               const blob = new Blob([new Uint8Array(buf, offset, jlen)], { type: "image/jpeg" });
               offset += jlen;
               try {
-                const bmp = await createImageBitmap(blob);
+                const bmp = await createImageBitmap(blob, { imageOrientation: "none", premultiplyAlpha: "none", colorSpaceConversion: "none" });
                 ctx.drawImage(bmp, dx, dy, dw, dh);
                 bmp.close();
                 debugStats.jpeg++;
@@ -821,7 +831,7 @@
             const jlen = buf.byteLength - 10;
             const blob = new Blob([new Uint8Array(buf, 10)], { type: "image/jpeg" });
             try {
-              const bmp = await createImageBitmap(blob);
+              const bmp = await createImageBitmap(blob, { imageOrientation: "none", premultiplyAlpha: "none", colorSpaceConversion: "none" });
               ctx.drawImage(bmp, dx, dy, dw, dh);
               bmp.close();
               debugStats.jpeg++;
@@ -830,7 +840,7 @@
           } else {
             const blob = new Blob([buf], { type: "image/jpeg" });
             try {
-              const bmp = await createImageBitmap(blob);
+              const bmp = await createImageBitmap(blob, { imageOrientation: "none", premultiplyAlpha: "none", colorSpaceConversion: "none" });
               if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
                 canvas.width = bmp.width;
                 canvas.height = bmp.height;

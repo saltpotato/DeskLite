@@ -40,19 +40,17 @@ except ImportError:
     HAS_CV2 = False
 
 
-def fast_region_hash(arr: np.ndarray) -> int:
-    """Computes an ultra-fast 64-bit content fingerprint of a 3D BGR/BGRA numpy region.
-    Uses 6-bit color quantization (>> 2) so 1-2 LSB DWM/GPU dithering noise never breaks cache hits."""
+def fast_region_hash(arr: np.ndarray, x: int = 0, y: int = 0) -> int:
+    """Computes an exact, collision-resistant 64-bit fingerprint of a 3D BGR/BGRA numpy region.
+    Never subsamples pixels so 1-pixel font glyphs, serifs, and cursors are never corrupted."""
     h, w = arr.shape[:2]
     if h < 4 or w < 4:
         return 0
-    step = 2 if (w * h < 4096) else 4
-    sub = np.ascontiguousarray(arr[::step, ::step, :3] >> 2)
-    c1 = zlib.adler32(sub.data) & 0xFFFFFFFF
-    c2 = zlib.crc32(sub.data) & 0xFFFFFFFF
-    # Mix dimensions into the 64-bit hash so differently sized regions never collide
-    dim_mix = ((w & 0xFFFF) << 16) | (h & 0xFFFF)
-    return ((c1 ^ dim_mix) << 32) | c2
+    buf = np.ascontiguousarray(arr[:, :, :3])
+    c1 = zlib.adler32(buf.data) & 0xFFFFFFFF
+    c2 = zlib.crc32(buf.data) & 0xFFFFFFFF
+    geom_mix = ((int(x) & 0xFFF) << 20) | ((int(y) & 0xFFF) << 8) | ((int(w) & 0xF) << 4) | (int(h) & 0xF)
+    return (((c1 ^ geom_mix) & 0xFFFFFFFF) << 32) | c2
 
 
 # ============================================================================
@@ -105,14 +103,15 @@ class StateCacheRecognizer(BaseRecognizer):
 
     def analyze(self, ctx: FrameContext):
         x, y, w, h = ctx.dirty_rect
-        if w < 12 or h < 12:
+        # Never cache small dynamic text/cursor rects (they encode in <0.2ms as sharp ~200B JPEGs)
+        if w < 64 or h < 32:
             return None
 
         prev_roi = ctx.prev_frame[y:y + h, x:x + w]
         curr_roi = ctx.curr_frame[y:y + h, x:x + w]
 
-        prev_hash = fast_region_hash(prev_roi)
-        curr_hash = fast_region_hash(curr_roi)
+        prev_hash = fast_region_hash(prev_roi, x, y)
+        curr_hash = fast_region_hash(curr_roi, x, y)
         if prev_hash == 0 or curr_hash == 0:
             return None
 
@@ -120,29 +119,30 @@ class StateCacheRecognizer(BaseRecognizer):
         dirty_set: set = ctx.shared["dirty_states"]
         cmds = []
 
-        # 1. Exact dirty_rect cache hit check
+        # 1. Exact dirty_rect cache hit check: MUST match exact coordinates and dimensions
         if prev_hash != curr_hash and curr_hash in known and curr_hash not in dirty_set:
-            if prev_hash not in known:
-                cmds.append(pack_save_state(prev_hash, x, y, w, h))
-                self._commit_known(known, dirty_set, prev_hash, (x, y, w, h))
+            if known.get(curr_hash) == (x, y, w, h):
+                if prev_hash not in known:
+                    cmds.append(pack_save_state(prev_hash, x, y, w, h))
+                    self._commit_known(known, dirty_set, prev_hash, (x, y, w, h))
 
-            known.move_to_end(curr_hash)
-            cmds.append(pack_restore_state(curr_hash, x, y, w, h))
-            est_saved = max(1024, int(w * h * 0.12))
-            ctx.shared["bytes_saved"] += est_saved
-            cmds.append(pack_overlay_meta({
-                "event": "cache_hit",
-                "rect": [x, y, w, h],
-                "saved_kb": round(ctx.shared["bytes_saved"] / 1024.0, 1)
-            }))
-            if ctx.shared.get("debug_mode", True):
-                logging.info(
-                    f"[VF-DEBUG][HOST] CACHE_HIT hash={curr_hash & 0xFFFFFFFF:08x} "
-                    f"rect=({x},{y},{w}x{h}) saved={est_saved / 1024.0:.1f}KB "
-                    f"total_saved={ctx.shared['bytes_saved'] / 1024.0:.1f}KB"
-                )
-            ctx.prev_frame[y:y + h, x:x + w] = curr_roi
-            return cmds
+                known.move_to_end(curr_hash)
+                cmds.append(pack_restore_state(curr_hash, x, y, w, h))
+                est_saved = max(1024, int(w * h * 0.12))
+                ctx.shared["bytes_saved"] += est_saved
+                cmds.append(pack_overlay_meta({
+                    "event": "cache_hit",
+                    "rect": [x, y, w, h],
+                    "saved_kb": round(ctx.shared["bytes_saved"] / 1024.0, 1)
+                }))
+                if ctx.shared.get("debug_mode", True):
+                    logging.info(
+                        f"[VF-DEBUG][HOST] CACHE_HIT hash={curr_hash & 0xFFFFFFFF:08x} "
+                        f"rect=({x},{y},{w}x{h}) saved={est_saved / 1024.0:.1f}KB "
+                        f"total_saved={ctx.shared['bytes_saved'] / 1024.0:.1f}KB"
+                    )
+                ctx.prev_frame[y:y + h, x:x + w] = curr_roi
+                return cmds
 
         # 2. Canonical & Sub-Region Known-Rect Peeling:
         # Check if any recently cached rectangle R_k = (kx, ky, kw, kh) overlapping dirty_rect
@@ -169,7 +169,7 @@ class StateCacheRecognizer(BaseRecognizer):
                 continue
 
             k_curr_roi = ctx.curr_frame[ky:ky + kh, kx:kx + kw]
-            k_curr_hash = fast_region_hash(k_curr_roi)
+            k_curr_hash = fast_region_hash(k_curr_roi, kx, ky)
             if k_curr_hash not in known or k_curr_hash in dirty_set or known[k_curr_hash][2:] != (kw, kh):
                 continue
 
@@ -179,7 +179,7 @@ class StateCacheRecognizer(BaseRecognizer):
                 continue
 
             # Save the outgoing state at k_rect (e.g. completed hover state) before restoring
-            k_prev_hash = fast_region_hash(k_prev_roi)
+            k_prev_hash = fast_region_hash(k_prev_roi, kx, ky)
             if k_prev_hash and k_prev_hash != k_curr_hash and k_prev_hash not in known:
                 cmds.append(pack_save_state(k_prev_hash, kx, ky, kw, kh))
                 self._commit_known(known, dirty_set, k_prev_hash, k_rect)
@@ -222,8 +222,8 @@ class StateCacheRecognizer(BaseRecognizer):
 
             rem_prev_roi = ctx.prev_frame[ry1:ry2, rx1:rx2]
             rem_curr_roi = ctx.curr_frame[ry1:ry2, rx1:rx2]
-            r_prev_hash = fast_region_hash(rem_prev_roi)
-            r_curr_hash = fast_region_hash(rem_curr_roi)
+            r_prev_hash = fast_region_hash(rem_prev_roi, rx1, ry1)
+            r_curr_hash = fast_region_hash(rem_curr_roi, rx1, ry1)
 
             if r_prev_hash and r_prev_hash not in known:
                 cmds.append(pack_save_state(r_prev_hash, rx1, ry1, rw, rh))
@@ -380,7 +380,7 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
 
             # 1) Save outgoing strip into Viewer RAM cache BEFORE shifting over it
             out_roi = ctx.prev_frame[out_y:out_y + sh_abs, x:x + w]
-            out_hash = fast_region_hash(out_roi)
+            out_hash = fast_region_hash(out_roi, x, out_y)
             if out_hash and out_hash not in ctx.shared["known_states"]:
                 cmds.append(pack_save_state(out_hash, x, out_y, w, sh_abs))
                 StateCacheRecognizer._commit_known(ctx.shared["known_states"], ctx.shared["dirty_states"], out_hash, (x, out_y, w, sh_abs))
@@ -408,12 +408,6 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
             # Sync prev_frame to curr_frame inside the scroll viewport so sub-threshold AA differences
             # never accumulate across consecutive scroll frames or pollute subsequent mouse hovers!
             ctx.prev_frame[y:y + h, x:x + w] = ctx.curr_frame[y:y + h, x:x + w]
-
-            # 6) Save the complete post-scroll viewport state in Viewer RAM cache
-            post_hash = fast_region_hash(ctx.curr_frame[y:y + h, x:x + w])
-            if post_hash and post_hash not in ctx.shared["known_states"]:
-                cmds.append(pack_save_state(post_hash, x, y, w, h))
-                StateCacheRecognizer._commit_known(ctx.shared["known_states"], ctx.shared["dirty_states"], post_hash, (x, y, w, h))
 
             est_saved = max(512, int(inner_w * overlap_h * 0.10))
             ctx.shared["bytes_saved"] += est_saved
@@ -499,10 +493,10 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
         return None
 
     def _encode_or_restore_strip(self, ctx: FrameContext, strip_arr: np.ndarray, sx: int, sy: int, sw: int, sh: int):
-        shash = fast_region_hash(strip_arr)
+        shash = fast_region_hash(strip_arr, sx, sy)
         known = ctx.shared["known_states"]
         dirty = ctx.shared["dirty_states"]
-        if shash and shash in known and shash not in dirty:
+        if shash and shash in known and shash not in dirty and known.get(shash) == (sx, sy, sw, sh):
             ctx.shared["bytes_saved"] += max(512, int(sw * sh * 0.12))
             known.move_to_end(shash)
             return [pack_restore_state(shash, sx, sy, sw, sh)], True
@@ -516,7 +510,7 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
     @staticmethod
     def _find_residual_rects(shifted: np.ndarray, target: np.ndarray, base_x: int, base_y: int):
         """
-        Compares the shifted overlap region against the true target region on a pixel grid.
+        Compares the shifted overlap region against the true target region on a 1:1 pixel grid.
         Guarantees that 100% of differing pixels are patched with zero artifacts or pixel leakage.
         Returns None if mismatch area exceeds 14% of the overlap (abort scroll/move transform).
         """
@@ -524,12 +518,14 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
         if oh < 4 or ow < 4:
             return []
 
-        # Downsample by 2 for ultra-fast difference check across full 2560x1440 screens
-        s_sub = shifted[::2, ::2, :3].astype(np.int16)
-        t_sub = target[::2, ::2, :3].astype(np.int16)
-        diff = np.abs(s_sub - t_sub).max(axis=2)
-        # diff > 3 detects any true visual change (subpixel text, borders, cursors)
-        bad = diff > 3
+        # Full 1:1 pixel resolution difference via SIMD-vectorized OpenCV (~2.5ms on 1080p)
+        if HAS_CV2:
+            diff = cv2.absdiff(shifted[:, :, :3], target[:, :, :3])
+            bad = (diff[:, :, 0] > 3) | (diff[:, :, 1] > 3) | (diff[:, :, 2] > 3)
+        else:
+            diff = np.abs(shifted[:, :, :3].astype(np.int16) - target[:, :, :3].astype(np.int16)).max(axis=2)
+            bad = diff > 3
+
         bad_count = int(bad.sum())
         total_cells = bad.size
         bad_ratio = bad_count / max(1, total_cells)
@@ -541,16 +537,16 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
 
         rects = []
         if HAS_CV2 and bad.shape[0] >= 3 and bad.shape[1] >= 3:
-            # Dilate to merge neighboring differing pixels into clean rectangular patches
+            # 3x3 dilation bridges 1px anti-aliasing gaps so letters and cursors become clean rectangles
             dil = cv2.dilate(bad.astype(np.uint8), np.ones((3, 3), dtype=np.uint8))
             num_l, _, stats, _ = cv2.connectedComponentsWithStats(dil, connectivity=8)
 
-            # If there are many micro differences across the entire window, merge into a bounding box
+            # If there are many micro differences across the entire window, merge into a tight bounding box
             if num_l > 12:
                 ys, xs = np.nonzero(bad)
                 if ys.size > 0:
-                    y1, y2 = int(ys.min()) * 2, (int(ys.max()) + 1) * 2
-                    x1, x2 = int(xs.min()) * 2, (int(xs.max()) + 1) * 2
+                    y1, y2 = int(ys.min()), int(ys.max()) + 1
+                    x1, x2 = int(xs.min()), int(xs.max()) + 1
                     bbox_area = (x2 - x1) * (y2 - y1)
                     if bbox_area <= (ow * oh * 0.22):
                         return [(base_x + x1, base_y + y1, max(4, x2 - x1), max(4, y2 - y1))]
@@ -558,10 +554,10 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                 return []
 
             for lid in range(1, num_l):
-                gx = int(stats[lid, cv2.CC_STAT_LEFT]) * 2
-                gy = int(stats[lid, cv2.CC_STAT_TOP]) * 2
-                gw_c = int(stats[lid, cv2.CC_STAT_WIDTH]) * 2
-                gh_c = int(stats[lid, cv2.CC_STAT_HEIGHT]) * 2
+                gx = int(stats[lid, cv2.CC_STAT_LEFT])
+                gy = int(stats[lid, cv2.CC_STAT_TOP])
+                gw_c = int(stats[lid, cv2.CC_STAT_WIDTH])
+                gh_c = int(stats[lid, cv2.CC_STAT_HEIGHT])
 
                 rx = max(0, min(ow - 4, gx))
                 ry = max(0, min(oh - 4, gy))
@@ -571,8 +567,8 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
         else:
             ys, xs = np.nonzero(bad)
             if ys.size > 0:
-                y1, y2 = int(ys.min()) * 2, (int(ys.max()) + 1) * 2
-                x1, x2 = int(xs.min()) * 2, (int(xs.max()) + 1) * 2
+                y1, y2 = int(ys.min()), int(ys.max()) + 1
+                x1, x2 = int(xs.min()), int(xs.max()) + 1
                 rects.append((base_x + x1, base_y + y1, max(4, x2 - x1), max(4, y2 - y1)))
 
         total_area = sum(rw * rh for _, _, rw, rh in rects)
@@ -872,8 +868,8 @@ class WindowMove2DRecognizer(BaseRecognizer):
                     return [pack_restore_bg(sx, sy, sw, sh)], "bg"
 
         # 2. Exact hash match from StateCache
-        shash = fast_region_hash(strip_arr)
-        if shash and shash in known and shash not in dirty and known[shash][2:] == (sw, sh):
+        shash = fast_region_hash(strip_arr, sx, sy)
+        if shash and shash in known and shash not in dirty and known.get(shash) == (sx, sy, sw, sh):
             ctx.shared["bytes_saved"] += max(512, int(sw * sh * 0.12))
             known.move_to_end(shash)
             return [pack_restore_state(shash, sx, sy, sw, sh)], "cache"
@@ -953,6 +949,11 @@ class AnimationCycleRecognizer(BaseRecognizer):
     """
     name = "AnimationCycleRecognizer"
 
+    def on_input_event(self, evt: dict, shared: dict):
+        # Clear animation hotspots when user clicks or types so typing is NEVER tracked as animation!
+        if evt.get("event") in ("key_down", "key_up", "mouse_down", "mouse_up", "shortcut"):
+            shared.get("anim_hotspots", []).clear()
+
     @staticmethod
     def _make_thumb(roi: np.ndarray) -> tuple[np.ndarray, float]:
         bgr = roi[:, :, :3]
@@ -965,10 +966,11 @@ class AnimationCycleRecognizer(BaseRecognizer):
 
     def analyze(self, ctx: FrameContext):
         x, y, w, h = ctx.dirty_rect
-        # Only target compact UI animation regions (small spinners, loading wheels <= 64x64)
-        if w < 12 or h < 12:
+        # Target compact circular loading spinners (8x8 up to 64x64)
+        if w < 8 or h < 8 or w > 64 or h > 64:
             return None
-        if not (w <= 64 and h <= 64):
+        # Spinners are square! Non-square rects (text fields, buttons, cursors) must never trigger cycle matching!
+        if abs(w - h) > 18:
             return None
 
         fh, fw = ctx.curr_frame.shape[:2]
@@ -1017,7 +1019,7 @@ class AnimationCycleRecognizer(BaseRecognizer):
         ux2 = max(px2, hx + hw)
         uy2 = max(py2, hy + hh)
         uw, uh = ux2 - ux1, uy2 - uy1
-        if not (uw <= 64 and uh <= 64):
+        if not (uw <= 64 and uh <= 64 and abs(uw - uh) <= 18):
             return None
 
         if (ux1, uy1, uw, uh) != (hx, hy, hw, hh):
@@ -1026,7 +1028,7 @@ class AnimationCycleRecognizer(BaseRecognizer):
         matched_hs["hits"] += 1
         matched_hs["last_ts"] = now
 
-        # Activate animation cycle tracking once >= 2 updates occur in this hotspot
+        # Activate animation cycle tracking once >= 2 updates occur in this spinner hotspot
         if matched_hs["hits"] < 2:
             return None
 
@@ -1070,7 +1072,7 @@ class AnimationCycleRecognizer(BaseRecognizer):
             if mad < best_mad and mad < max(1.8, step_mad * 0.80):
                 inlier = float((diff.max(axis=2) <= 10).mean())
                 mean_shift = float(np.abs(c_sub.mean(axis=(0, 1)) - kthumb.mean(axis=(0, 1))).max())
-                is_spinner = (kw <= 64 and kh <= 64 and abs(kw - kh) <= 16 and num_kf >= 6)
+                is_spinner = (kw <= 64 and kh <= 64 and abs(kw - kh) <= 18 and num_kf >= 6)
                 std_ok = (kstd > 3.5 and 0.70 <= (c_std / kstd) <= 1.35) if kstd > 3.5 else (c_std <= 5.0)
                 if mean_shift <= 8.0 and std_ok:
                     if (mad <= 3.8 and inlier >= 0.94) or (is_spinner and mad <= 6.0):
@@ -1086,7 +1088,6 @@ class AnimationCycleRecognizer(BaseRecognizer):
                         best_rect = krect
         matched_hs["keyframes"] = valid_kf
 
-        cmds = []
         if best_hash is not None and best_rect is not None:
             bx, by, bw, bh = best_rect
             # Cycle hit! Replay this animation frame directly from the Viewer's RAM cache (0 KB JPEG)
@@ -1094,7 +1095,7 @@ class AnimationCycleRecognizer(BaseRecognizer):
             ctx.shared["pending_post_save"] = None
             matched_hs["last_hit_hash"] = best_hash
             known.move_to_end(best_hash)
-            cmds.append(pack_restore_state(best_hash, bx, by, bw, bh))
+            cmds = [pack_restore_state(best_hash, bx, by, bw, bh)]
             est_saved = max(1024, int(bw * bh * 0.14))
             ctx.shared["bytes_saved"] += est_saved
             cmds.append(pack_overlay_meta({
@@ -1111,39 +1112,15 @@ class AnimationCycleRecognizer(BaseRecognizer):
             ctx.prev_frame[by:by + bh, bx:bx + bw] = ctx.curr_frame[by:by + bh, bx:bx + bw]
             return cmds
 
-        # 2. First pass of this animation phase: learn & cache the unified canonical box U = (ux, uy, uw, uh)
-        prev_u = ctx.prev_frame[uy:uy + uh, ux:ux + uw]
-
-        ctx.shared["pending_pre_save"] = None
-        ctx.shared["pending_post_save"] = None
-
-        if not matched_hs["keyframes"]:
-            prev_hash = fast_region_hash(prev_u)
-            if prev_hash and prev_hash not in known:
-                cmds.append(pack_save_state(prev_hash, ux, uy, uw, uh))
-                StateCacheRecognizer._commit_known(known, dirty_set, prev_hash, (ux, uy, uw, uh))
-                prev_thumb, prev_std = self._make_thumb(prev_u)
-                matched_hs["keyframes"].append((prev_hash, (ux, uy, uw, uh), prev_thumb, prev_std, prev_u.copy()))
-
-        jpeg_bytes = ctx.encode_jpeg(curr_u, ctx.quality)
-        cmds.append(pack_jpeg_patch(ux, uy, uw, uh, jpeg_bytes))
-
-        curr_hash = fast_region_hash(curr_u)
-        if curr_hash:
-            cmds.append(pack_save_state(curr_hash, ux, uy, uw, uh))
-            StateCacheRecognizer._commit_known(known, dirty_set, curr_hash, (ux, uy, uw, uh))
-            matched_hs["keyframes"].append((curr_hash, (ux, uy, uw, uh), curr_u_thumb, curr_u_std, curr_u.copy()))
-            matched_hs["last_hit_hash"] = curr_hash
-            if len(matched_hs["keyframes"]) > 64:
-                matched_hs["keyframes"].pop(0)
-
-        if ctx.shared.get("debug_mode", True):
-            logging.info(
-                f"[VF-DEBUG][HOST] ANIM_LEARN_FRAME rect=({ux},{uy},{uw}x{uh}) "
-                f"keyframes={len(matched_hs['keyframes'])} size={len(jpeg_bytes) / 1024.0:.1f}KB"
-            )
-        ctx.prev_frame[uy:uy + uh, ux:ux + uw] = curr_u
-        return cmds
+        # No cycle hit: silently record keyframe for future cycle detection and return None
+        # to allow normal clean delta JPEG encoding!
+        if len(matched_hs["keyframes"]) < 32:
+            curr_hash = fast_region_hash(curr_u, ux, uy)
+            if curr_hash and curr_hash not in known:
+                ctx.shared["pending_post_save"] = (curr_hash, ux, uy, uw, uh)
+                StateCacheRecognizer._commit_known(known, dirty_set, curr_hash, (ux, uy, uw, uh))
+                matched_hs["keyframes"].append((curr_hash, (ux, uy, uw, uh), curr_u_thumb, curr_u_std, curr_u.copy()))
+        return None
 
 
 # ============================================================================
