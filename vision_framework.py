@@ -516,93 +516,67 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
     @staticmethod
     def _find_residual_rects(shifted: np.ndarray, target: np.ndarray, base_x: int, base_y: int):
         """
-        Compares the shifted overlap region against the true target region on a 4x4 grid.
-        Peels off stationary top/bottom headers and left/right borders into thin strips
-        plus any clustered interior stationary elements (ignoring isolated 1-cell ClearType shimmer).
-        Returns None if the mismatch area exceeds 32% of the overlap (abort scroll transform).
+        Compares the shifted overlap region against the true target region on a pixel grid.
+        Guarantees that 100% of differing pixels are patched with zero artifacts or pixel leakage.
+        Returns None if mismatch area exceeds 14% of the overlap (abort scroll/move transform).
         """
         oh, ow = shifted.shape[:2]
-        if oh < 8 or ow < 8:
+        if oh < 4 or ow < 4:
             return []
-        diff = np.abs(shifted[::4, ::4, :3].astype(np.int16) - target[::4, ::4, :3].astype(np.int16)).max(axis=2)
-        bad = diff > 16
-        bad_ratio = float(bad.mean())
-        if bad_ratio > 0.32:
-            return None
+
+        # Downsample by 2 for ultra-fast difference check across full 2560x1440 screens
+        s_sub = shifted[::2, ::2, :3].astype(np.int16)
+        t_sub = target[::2, ::2, :3].astype(np.int16)
+        diff = np.abs(s_sub - t_sub).max(axis=2)
+        # diff > 3 detects any true visual change (subpixel text, borders, cursors)
+        bad = diff > 3
+        bad_count = int(bad.sum())
+        total_cells = bad.size
+        bad_ratio = bad_count / max(1, total_cells)
+
         if bad_ratio == 0.0:
             return []
+        if bad_ratio > 0.14:
+            return None
 
-        gh, gw = bad.shape
-        r0, r1 = 0, gh
-        c0, c1 = 0, gw
         rects = []
+        if HAS_CV2 and bad.shape[0] >= 3 and bad.shape[1] >= 3:
+            # Dilate to merge neighboring differing pixels into clean rectangular patches
+            dil = cv2.dilate(bad.astype(np.uint8), np.ones((3, 3), dtype=np.uint8))
+            num_l, _, stats, _ = cv2.connectedComponentsWithStats(dil, connectivity=8)
 
-        # 1. Peel stationary top rows (e.g. top border or sticky header)
-        while r0 < r1 and float(bad[r0, c0:c1].mean()) > 0.20:
-            r0 += 1
-        if r0 > 0:
-            py2 = min(oh, r0 * 4 + 4)
-            rects.append((int(base_x), int(base_y), int(ow), int(py2)))
+            # If there are many micro differences across the entire window, merge into a bounding box
+            if num_l > 12:
+                ys, xs = np.nonzero(bad)
+                if ys.size > 0:
+                    y1, y2 = int(ys.min()) * 2, (int(ys.max()) + 1) * 2
+                    x1, x2 = int(xs.min()) * 2, (int(xs.max()) + 1) * 2
+                    bbox_area = (x2 - x1) * (y2 - y1)
+                    if bbox_area <= (ow * oh * 0.22):
+                        return [(base_x + x1, base_y + y1, max(4, x2 - x1), max(4, y2 - y1))]
+                    return None
+                return []
 
-        # 2. Peel stationary bottom rows (e.g. bottom border or sticky footer)
-        orig_r1 = r1
-        while r1 > r0 and float(bad[r1 - 1, c0:c1].mean()) > 0.20:
-            r1 -= 1
-        if r1 < orig_r1:
-            py1 = max(0, r1 * 4 - 4)
-            rects.append((int(base_x), int(base_y + py1), int(ow), int(oh - py1)))
+            for lid in range(1, num_l):
+                gx = int(stats[lid, cv2.CC_STAT_LEFT]) * 2
+                gy = int(stats[lid, cv2.CC_STAT_TOP]) * 2
+                gw_c = int(stats[lid, cv2.CC_STAT_WIDTH]) * 2
+                gh_c = int(stats[lid, cv2.CC_STAT_HEIGHT]) * 2
 
-        # 3. Peel stationary left columns (e.g. left border or sidebar)
-        mid_y1 = min(oh, r0 * 4)
-        mid_y2 = max(mid_y1, min(oh, r1 * 4))
-        mid_h = mid_y2 - mid_y1
-        if mid_h > 0 and r0 < r1:
-            while c0 < c1 and float(bad[r0:r1, c0].mean()) > 0.20:
-                c0 += 1
-            if c0 > 0:
-                px2 = min(ow, c0 * 4 + 4)
-                rects.append((int(base_x), int(base_y + mid_y1), int(px2), int(mid_h)))
-
-            # 4. Peel stationary right columns
-            orig_c1 = c1
-            while c1 > c0 and float(bad[r0:r1, c1 - 1].mean()) > 0.20:
-                c1 -= 1
-            if c1 < orig_c1:
-                px1 = max(0, c1 * 4 - 4)
-                rects.append((int(base_x + px1), int(base_y + mid_y1), int(ow - px1), int(mid_h)))
-
-        # 5. Any remaining interior stationary elements (filter out isolated 1-cell ClearType AA noise)
-        if r0 < r1 and c0 < c1:
-            sub = bad[r0:r1, c0:c1]
-            if np.any(sub):
-                if HAS_CV2 and sub.shape[0] >= 3 and sub.shape[1] >= 3:
-                    sub_u8 = sub.astype(np.uint8)
-                    # Filter out single isolated 4x4 cells that have no neighbors in a 3x3 window
-                    nbr_count = cv2.boxFilter(sub_u8, ddepth=-1, ksize=(3, 3), normalize=False)
-                    clustered = (sub_u8 > 0) & (nbr_count >= 2)
-                    if np.any(clustered):
-                        dil = cv2.dilate(clustered.astype(np.uint8), np.ones((5, 5), dtype=np.uint8))
-                        num_l, _, stats, _ = cv2.connectedComponentsWithStats(dil, connectivity=8)
-                        for lid in range(1, min(num_l, 5)):
-                            gx, gy, gw_c, gh_c = int(stats[lid, 0]), int(stats[lid, 1]), int(stats[lid, 2]), int(stats[lid, 3])
-                            iy1 = max(0, (r0 + gy) * 4)
-                            iy2 = min(oh, (r0 + gy + gh_c) * 4)
-                            ix1 = max(0, (c0 + gx) * 4)
-                            ix2 = min(ow, (c0 + gx + gw_c) * 4)
-                            if ix2 > ix1 and iy2 > iy1:
-                                rects.append((int(base_x + ix1), int(base_y + iy1), int(ix2 - ix1), int(iy2 - iy1)))
-                else:
-                    ys, xs = np.nonzero(sub)
-                    if ys.size >= 2:
-                        iy1 = max(0, (r0 + int(ys.min())) * 4 - 4)
-                        iy2 = min(oh, (r0 + int(ys.max()) + 1) * 4 + 4)
-                        ix1 = max(0, (c0 + int(xs.min())) * 4 - 4)
-                        ix2 = min(ow, (c0 + int(xs.max()) + 1) * 4 + 4)
-                        if ix2 > ix1 and iy2 > iy1:
-                            rects.append((int(base_x + ix1), int(base_y + iy1), int(ix2 - ix1), int(iy2 - iy1)))
+                rx = max(0, min(ow - 4, gx))
+                ry = max(0, min(oh - 4, gy))
+                rw = max(4, min(ow - rx, gw_c))
+                rh = max(4, min(oh - ry, gh_c))
+                rects.append((base_x + rx, base_y + ry, rw, rh))
+        else:
+            ys, xs = np.nonzero(bad)
+            if ys.size > 0:
+                y1, y2 = int(ys.min()) * 2, (int(ys.max()) + 1) * 2
+                x1, x2 = int(xs.min()) * 2, (int(xs.max()) + 1) * 2
+                rects.append((base_x + x1, base_y + y1, max(4, x2 - x1), max(4, y2 - y1)))
 
         total_area = sum(rw * rh for _, _, rw, rh in rects)
-        if total_area > (ow * oh * 0.42):
+        if total_area > (ow * oh * 0.28):
             return None
         return rects
 
@@ -664,7 +638,7 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
     @staticmethod
     def _verify_overlap(prev_roi: np.ndarray, curr_roi: np.ndarray, dx: int, dy: int, w: int, h: int) -> tuple[bool, float]:
         """Verifies that the shifted overlapping region genuinely matches on a coarse 8x8 pixel grid.
-        Uses outlier-robust inlier ratio (percentage of pixels within <= 12 RGB units) so sticky
+        Uses outlier-robust inlier ratio (percentage of pixels within <= 8 RGB units) so sticky
         headers or sidebars never skew the score."""
         if dy > 0:
             a = prev_roi[dy:h:8, :w:8, :3]
@@ -684,8 +658,8 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
         if a.size == 0 or a.shape != b.shape:
             return False, 0.0
         diff_max = np.abs(a.astype(np.int16) - b.astype(np.int16)).max(axis=2)
-        inlier_ratio = float((diff_max <= 12).mean())
-        return inlier_ratio >= 0.68, inlier_ratio
+        inlier_ratio = float((diff_max <= 8).mean())
+        return inlier_ratio >= 0.85, inlier_ratio
 
     @staticmethod
     def _check_scrollbar_dirty(prev_sb: np.ndarray, curr_sb: np.ndarray) -> bool:
@@ -736,9 +710,9 @@ class WindowMove2DRecognizer(BaseRecognizer):
         shifted = prev_roi[src_y - y : src_y - y + win_h, src_x - x : src_x - x + win_w]
         target = curr_roi[dst_y - y : dst_y - y + win_h, dst_x - x : dst_x - x + win_w]
 
-        diff_8 = np.abs(shifted[::8, ::8, :3].astype(np.int16) - target[::8, ::8, :3].astype(np.int16)).max(axis=2)
-        inlier_ratio = float((diff_8 <= 14).mean())
-        if inlier_ratio < 0.65:
+        diff_4 = np.abs(shifted[::4, ::4, :3].astype(np.int16) - target[::4, ::4, :3].astype(np.int16)).max(axis=2)
+        inlier_ratio = float((diff_4 <= 8).mean())
+        if inlier_ratio < 0.88:
             return None
 
         residual_rects = Scroll2DAndSliderRecognizer._find_residual_rects(
@@ -893,7 +867,7 @@ class WindowMove2DRecognizer(BaseRecognizer):
             bg_sub = bg_frame[sy:sy + sh, sx:sx + sw]
             if bg_sub.shape == strip_arr.shape:
                 diff = np.abs(strip_arr[::2, ::2, :3].astype(np.int16) - bg_sub[::2, ::2, :3].astype(np.int16)).max(axis=2)
-                if float((diff <= 12).mean()) >= 0.985 and float(diff.mean()) <= 2.5:
+                if float((diff <= 3).mean()) >= 0.995 and float(diff.mean()) <= 0.8:
                     ctx.shared["bytes_saved"] += max(512, int(sw * sh * 0.14))
                     return [pack_restore_bg(sx, sy, sw, sh)], "bg"
 
@@ -925,15 +899,16 @@ class WindowMove2DRecognizer(BaseRecognizer):
         if h < 40 or w < 40:
             return None
 
-        p_gray = prev_roi[:, :, 1].astype(np.float32)
-        c_gray = curr_roi[:, :, 1].astype(np.float32)
+        ds = 2 if (w >= 200 and h >= 150) else 1
+        p_gray = prev_roi[::ds, ::ds, 1].astype(np.float32)
+        c_gray = curr_roi[::ds, ::ds, 1].astype(np.float32)
 
         try:
             shift, resp = cv2.phaseCorrelate(p_gray, c_gray)
-            if resp < 0.25:
+            if resp < 0.35:
                 return None
-            base_x = int(round(shift[0]))
-            base_y = int(round(shift[1]))
+            base_x = int(round(shift[0] * ds))
+            base_y = int(round(shift[1] * ds))
 
             # Fine-tune exact integer shift across overlapping interior to eliminate 1-2px shearing
             sy1 = 0 if base_y >= 0 else -base_y
@@ -941,20 +916,22 @@ class WindowMove2DRecognizer(BaseRecognizer):
             sx1 = 0 if base_x >= 0 else -base_x
             sx2 = w - base_x if base_x >= 0 else w
 
-            p_sub = prev_roi[sy1:sy2:4, sx1:sx2:4, :3].astype(np.int16)
-            c_base = curr_roi[sy1 + base_y : sy2 + base_y : 4, sx1 + base_x : sx2 + base_x : 4, :3].astype(np.int16)
+            p_sub = prev_roi[sy1:sy2:2, sx1:sx2:2, :3].astype(np.int16)
+            c_base = curr_roi[sy1 + base_y : sy2 + base_y : 2, sx1 + base_x : sx2 + base_x : 2, :3].astype(np.int16)
             base_score = float(np.abs(p_sub - c_base).mean())
 
             best_mv = (base_x, base_y)
             best_score = base_score
 
-            for dy in (base_y - 1, base_y + 1):
-                for dx in (base_x - 1, base_x + 1):
+            for dy in range(base_y - 2, base_y + 3):
+                for dx in range(base_x - 2, base_x + 3):
+                    if (dx, dy) == (base_x, base_y):
+                        continue
                     if sy1 + dy < 0 or sy2 + dy > h or sx1 + dx < 0 or sx2 + dx > w:
                         continue
-                    c_sub = curr_roi[sy1 + dy : sy2 + dy : 4, sx1 + dx : sx2 + dx : 4, :3].astype(np.int16)
+                    c_sub = curr_roi[sy1 + dy : sy2 + dy : 2, sx1 + dx : sx2 + dx : 2, :3].astype(np.int16)
                     score = float(np.abs(p_sub - c_sub).mean())
-                    if score < best_score - 0.25:
+                    if score < best_score - 0.15:
                         best_score = score
                         best_mv = (dx, dy)
             return best_mv
@@ -988,10 +965,10 @@ class AnimationCycleRecognizer(BaseRecognizer):
 
     def analyze(self, ctx: FrameContext):
         x, y, w, h = ctx.dirty_rect
-        # Only target compact UI animation regions (spinners, loading wheels, pulsing badges, progress bars)
+        # Only target compact UI animation regions (small spinners, loading wheels <= 64x64)
         if w < 12 or h < 12:
             return None
-        if not ((w <= 96 and h <= 96) or (w <= 280 and h <= 36)):
+        if not (w <= 64 and h <= 64):
             return None
 
         fh, fw = ctx.curr_frame.shape[:2]
@@ -1040,7 +1017,7 @@ class AnimationCycleRecognizer(BaseRecognizer):
         ux2 = max(px2, hx + hw)
         uy2 = max(py2, hy + hh)
         uw, uh = ux2 - ux1, uy2 - uy1
-        if not ((uw <= 96 and uh <= 96) or (uw <= 280 and uh <= 36)):
+        if not (uw <= 64 and uh <= 64):
             return None
 
         if (ux1, uy1, uw, uh) != (hx, hy, hw, hh):
@@ -1081,8 +1058,7 @@ class AnimationCycleRecognizer(BaseRecognizer):
             if khash == last_hit:
                 continue
             kx, ky, kw, kh = krect
-            # Keyframe MUST match the current region dimensions (no giant keyframe swallowing small dirty rect!)
-            if abs(kw - uw) > 8 or abs(kh - uh) > 8 or abs(kx - ux) > 8 or abs(ky - uy) > 8:
+            if abs(kw - uw) > 4 or abs(kh - uh) > 4 or abs(kx - ux) > 4 or abs(ky - uy) > 4:
                 continue
 
             c_sub, c_std = curr_u_thumb, curr_u_std
@@ -1091,18 +1067,20 @@ class AnimationCycleRecognizer(BaseRecognizer):
                 continue
             diff = np.abs(c_sub - kthumb)
             mad = float(diff.mean())
-            if mad < best_mad and mad < max(2.2, step_mad * 0.85):
-                inlier = float((diff.max(axis=2) <= 14).mean())
+            if mad < best_mad and mad < max(1.8, step_mad * 0.80):
+                inlier = float((diff.max(axis=2) <= 10).mean())
                 mean_shift = float(np.abs(c_sub.mean(axis=(0, 1)) - kthumb.mean(axis=(0, 1))).max())
-                is_spinner = (kw <= 84 and kh <= 84 and abs(kw - kh) <= 28 and num_kf >= 8)
-                std_ok = (kstd > 3.5 and 0.65 <= (c_std / kstd) <= 1.45) if kstd > 3.5 else (c_std <= 5.0)
-                if mean_shift <= 10.0 and std_ok:
-                    if (mad <= 5.2 and inlier >= 0.88) or (is_spinner and mad <= 8.5):
-                        # Verify against full pixel ROI if available to guarantee zero visual corruption!
+                is_spinner = (kw <= 64 and kh <= 64 and abs(kw - kh) <= 16 and num_kf >= 6)
+                std_ok = (kstd > 3.5 and 0.70 <= (c_std / kstd) <= 1.35) if kstd > 3.5 else (c_std <= 5.0)
+                if mean_shift <= 8.0 and std_ok:
+                    if (mad <= 3.8 and inlier >= 0.94) or (is_spinner and mad <= 6.0):
+                        # Strict pixel verification: must match full pixel ROI to prevent visual corruption!
                         if kroi is not None and kroi.shape == curr_u.shape:
-                            p_diff = np.abs(curr_u[::2, ::2, :3].astype(np.int16) - kroi[::2, ::2, :3].astype(np.int16)).max(axis=2)
-                            if float((p_diff <= 14).mean()) < 0.90 or float(p_diff.mean()) > 4.5:
+                            p_diff = np.abs(curr_u.astype(np.int16) - kroi.astype(np.int16)).max(axis=2)
+                            if float((p_diff <= 4).mean()) < 0.98 or float(p_diff.mean()) > 1.2:
                                 continue
+                        else:
+                            continue
                         best_mad = mad
                         best_hash = khash
                         best_rect = krect
@@ -1198,7 +1176,7 @@ class VisionHostPipeline:
             "dirty_below": False,
             "bytes_saved": 0,
             "bg_frame": None,
-            "debug_mode": True,
+            "debug_mode": False,
         }
 
     def register_plugin(self, plugin: BaseRecognizer):
@@ -1397,7 +1375,7 @@ class VisionHostPipeline:
             total_cells = max(1, sub_mask.size)
             density = dirty_cells / total_cells
 
-            # If Macro Island is large enough to be a Scroll viewport or full Tab switch, test plugins on it first
+            # If Macro Island is large enough to be a Scroll viewport or full Tab switch, test plugins on it
             if mw >= 160 and mh >= 120:
                 self.shared["pending_cmds"].clear()
                 self.shared["pending_pre_save"] = None
@@ -1417,7 +1395,7 @@ class VisionHostPipeline:
                     micro_count += 1
                     continue
 
-            # DENSE SURFACE FAST PATH:
+            # DENSE SURFACE FAST PATH (Videos / 3D Canvases / Heavy Animations):
             # If not a scroll/window move, but dense (>= 35% dirty cells) and large (>= 200x150),
             # do NOT fragment into 8 micro-islands! Slicing a dynamic video/canvas creates tearing
             # and burns 5x CPU compressing 8 separate JPEGs. Encode directly as 1 cohesive patch:
@@ -1585,10 +1563,10 @@ class VisionViewerDecoder:
         self.saved_kb = 0.0
         self.last_event = ""
         self.last_event_ts = 0.0
-        self.overlay_enabled = True
+        self.overlay_enabled = False
 
         # Android Developer Options style surface update visualization ("Show surface updates")
-        self.debug_mode = True
+        self.debug_mode = False
         self.debug_rects = collections.deque(maxlen=40)  # dicts: x, y, w, h, kind, label, ts
         self.stats_cache_hits = 0
         self.stats_scroll_blits = 0

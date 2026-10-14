@@ -192,7 +192,7 @@
         <button type="button" onclick="sendClipboard()" style="background:#374151; padding:4px 8px; font-size:11px;" title="Send local clipboard text to remote PC">📋 Paste</button>
         <button type="button" onclick="sendShortcut('win_key')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Open Start Menu">🪟 Start</button>
         <button type="button" onclick="sendShortcut('explorer')" style="background:#374151; padding:4px 8px; font-size:11px;" title="Open File Explorer">📁 Explorer</button>
-        <button type="button" id="btnVisionDebug" onclick="toggleVisionDebug()" style="background:#0d9488; padding:4px 8px; font-size:11px;" title="Toggle Android-style Vision Surface Update Debug Coloring">🔬 Debug: ON</button>
+        <button type="button" id="btnVisionDebug" onclick="toggleVisionDebug()" style="background:#374151; padding:4px 8px; font-size:11px;" title="Toggle Android-style Vision Surface Update Debug Coloring">🔬 Debug: OFF</button>
       </div>
       <div style="height: 20px; width: 1px; background: #444; margin: 0 4px;"></div>
       <a href="/download/DeskLite.exe" download style="text-decoration:none;">
@@ -238,7 +238,7 @@
     let ctx = canvas.getContext("2d");
     let debugCanvas = document.getElementById("debugCanvas");
     let debugCtx = debugCanvas.getContext("2d");
-    let visionDebugMode = true;
+    let visionDebugMode = false;
     let debugRects = [];
     let debugStats = { cache: 0, scroll: 0, bg: 0, jpeg: 0 };
     let statusText = document.getElementById("statusText");
