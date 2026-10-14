@@ -723,7 +723,10 @@ class WindowMove2DRecognizer(BaseRecognizer):
         if mv is None:
             return None
         mv_x, mv_y = mv
-        if abs(mv_x) + abs(mv_y) < 4:
+        # Window moves are 2D diagonal mouse drags across the desktop.
+        # Pure 1D vertical (mv_x == 0) or horizontal (mv_y == 0) shifts are in-container scrolls,
+        # which belong exclusively to Scroll2DAndSliderRecognizer.
+        if abs(mv_x) < 2 or abs(mv_y) < 2:
             return None
 
         src_x, src_y, dst_x, dst_y, win_w, win_h = self._get_window_coords(x, y, w, h, mv_x, mv_y)
@@ -962,8 +965,10 @@ class AnimationCycleRecognizer(BaseRecognizer):
 
     def analyze(self, ctx: FrameContext):
         x, y, w, h = ctx.dirty_rect
-        # Only target compact UI animation regions (labels, spinners, badges, progress bars)
-        if w < 12 or h < 12 or w > 420 or h > 140 or (w * h) > 48000:
+        # Only target compact UI animation regions (spinners, loading wheels, pulsing badges, progress bars)
+        if w < 12 or h < 12:
+            return None
+        if not ((w <= 96 and h <= 96) or (w <= 280 and h <= 36)):
             return None
 
         fh, fw = ctx.curr_frame.shape[:2]
@@ -975,9 +980,9 @@ class AnimationCycleRecognizer(BaseRecognizer):
         known: collections.OrderedDict = ctx.shared["known_states"]
         dirty_set: set = ctx.shared["dirty_states"]
 
-        # Find an existing hotspot that overlaps or is adjacent (within 16px) to dirty_rect
+        # Find an existing hotspot that overlaps or is tightly adjacent (within 8px) to dirty_rect
         matched_hs = None
-        margin = 16
+        margin = 8
         for hs in hotspots:
             hx, hy, hw, hh = hs["rect"]
             if (x <= hx + hw + margin and x + w + margin >= hx and
@@ -995,7 +1000,7 @@ class AnimationCycleRecognizer(BaseRecognizer):
                 "hits": 1,
                 "last_ts": now,
                 "last_hit_hash": None,
-                "keyframes": [],  # list of (khash, krect, kthumb, kstd)
+                "keyframes": [],  # list of (khash, krect, kthumb, kstd, kroi)
             })
             if len(hotspots) > 16:
                 hotspots.pop(0)
@@ -1012,7 +1017,7 @@ class AnimationCycleRecognizer(BaseRecognizer):
         ux2 = max(px2, hx + hw)
         uy2 = max(py2, hy + hh)
         uw, uh = ux2 - ux1, uy2 - uy1
-        if uw > 420 or uh > 140 or (uw * uh) > 48000:
+        if not ((uw <= 96 and uh <= 96) or (uw <= 280 and uh <= 36)):
             return None
 
         if (ux1, uy1, uw, uh) != (hx, hy, hw, hh):
@@ -1021,7 +1026,7 @@ class AnimationCycleRecognizer(BaseRecognizer):
         matched_hs["hits"] += 1
         matched_hs["last_ts"] = now
 
-        # Activate animation cycle tracking once >= 2 interwoven updates occur in this hotspot
+        # Activate animation cycle tracking once >= 2 updates occur in this hotspot
         if matched_hs["hits"] < 2:
             return None
 
@@ -1033,9 +1038,6 @@ class AnimationCycleRecognizer(BaseRecognizer):
         u_step_mad = float(np.abs(curr_u_thumb - prev_u_thumb).mean())
 
         # 1. Recursion / Cycle Check:
-        # A learned keyframe k is a true cycle hit if it encompasses dirty_rect AND is closer to
-        # curr_frame than prev_frame already is (mad < step_mad * 0.85), preventing false self-hits
-        # against the immediately preceding frame during Loop 1.
         best_hash = None
         best_rect = None
         best_mad = 999.0
@@ -1043,22 +1045,25 @@ class AnimationCycleRecognizer(BaseRecognizer):
         valid_kf = []
         num_kf = len(matched_hs["keyframes"])
 
-        for khash, krect, kthumb, kstd in matched_hs["keyframes"]:
+        for entry in matched_hs["keyframes"]:
+            if len(entry) == 5:
+                khash, krect, kthumb, kstd, kroi = entry
+            else:
+                khash, krect, kthumb, kstd = entry[:4]
+                kroi = None
+
             if khash not in known or khash in dirty_set or known[khash] != krect:
                 continue
-            valid_kf.append((khash, krect, kthumb, kstd))
+            valid_kf.append((khash, krect, kthumb, kstd, kroi))
             if khash == last_hit:
                 continue
             kx, ky, kw, kh = krect
-            if not (kx <= x and ky <= y and kx + kw >= x + w and ky + kh >= y + h):
+            # Keyframe MUST match the current region dimensions (no giant keyframe swallowing small dirty rect!)
+            if abs(kw - uw) > 8 or abs(kh - uh) > 8 or abs(kx - ux) > 8 or abs(ky - uy) > 8:
                 continue
-            if krect == (ux, uy, uw, uh):
-                c_sub, c_std = curr_u_thumb, curr_u_std
-                step_mad = u_step_mad
-            else:
-                c_sub, c_std = self._make_thumb(ctx.curr_frame[ky:ky + kh, kx:kx + kw])
-                p_sub, _ = self._make_thumb(ctx.prev_frame[ky:ky + kh, kx:kx + kw])
-                step_mad = float(np.abs(c_sub - p_sub).mean())
+
+            c_sub, c_std = curr_u_thumb, curr_u_std
+            step_mad = u_step_mad
             if c_sub.shape != kthumb.shape:
                 continue
             diff = np.abs(c_sub - kthumb)
@@ -1070,6 +1075,11 @@ class AnimationCycleRecognizer(BaseRecognizer):
                 std_ok = (kstd > 3.5 and 0.65 <= (c_std / kstd) <= 1.45) if kstd > 3.5 else (c_std <= 5.0)
                 if mean_shift <= 10.0 and std_ok:
                     if (mad <= 5.2 and inlier >= 0.88) or (is_spinner and mad <= 8.5):
+                        # Verify against full pixel ROI if available to guarantee zero visual corruption!
+                        if kroi is not None and kroi.shape == curr_u.shape:
+                            p_diff = np.abs(curr_u[::2, ::2, :3].astype(np.int16) - kroi[::2, ::2, :3].astype(np.int16)).max(axis=2)
+                            if float((p_diff <= 14).mean()) < 0.90 or float(p_diff.mean()) > 4.5:
+                                continue
                         best_mad = mad
                         best_hash = khash
                         best_rect = krect
@@ -1112,7 +1122,7 @@ class AnimationCycleRecognizer(BaseRecognizer):
                 cmds.append(pack_save_state(prev_hash, ux, uy, uw, uh))
                 StateCacheRecognizer._commit_known(known, dirty_set, prev_hash, (ux, uy, uw, uh))
                 prev_thumb, prev_std = self._make_thumb(prev_u)
-                matched_hs["keyframes"].append((prev_hash, (ux, uy, uw, uh), prev_thumb, prev_std))
+                matched_hs["keyframes"].append((prev_hash, (ux, uy, uw, uh), prev_thumb, prev_std, prev_u.copy()))
 
         jpeg_bytes = ctx.encode_jpeg(curr_u, ctx.quality)
         cmds.append(pack_jpeg_patch(ux, uy, uw, uh, jpeg_bytes))
@@ -1121,7 +1131,7 @@ class AnimationCycleRecognizer(BaseRecognizer):
         if curr_hash:
             cmds.append(pack_save_state(curr_hash, ux, uy, uw, uh))
             StateCacheRecognizer._commit_known(known, dirty_set, curr_hash, (ux, uy, uw, uh))
-            matched_hs["keyframes"].append((curr_hash, (ux, uy, uw, uh), curr_u_thumb, curr_u_std))
+            matched_hs["keyframes"].append((curr_hash, (ux, uy, uw, uh), curr_u_thumb, curr_u_std, curr_u.copy()))
             matched_hs["last_hit_hash"] = curr_hash
             if len(matched_hs["keyframes"]) > 64:
                 matched_hs["keyframes"].pop(0)
@@ -1197,20 +1207,20 @@ class VisionHostPipeline:
     @staticmethod
     def _refine_rect(prev_frame: np.ndarray, curr_frame: np.ndarray,
                      rx1: int, ry1: int, rx2: int, ry2: int, fw: int, fh: int) -> tuple:
-        """Refines a coarse 4x4-grid bounding box to exact 2px-aligned boundaries of actual pixel changes
-        so adjacent touching buttons/controls never bleed into each other's bounding boxes."""
+        """Refines a coarse 4x4-grid bounding box to exact 1:1 boundaries of actual pixel changes
+        with 1px safety margin so anti-aliasing edges never get clipped."""
         sx1, sy1 = max(0, rx1 - 4), max(0, ry1 - 4)
         sx2, sy2 = min(fw, rx2 + 4), min(fh, ry2 + 4)
-        sub_p = prev_frame[sy1:sy2:2, sx1:sx2:2, :3]
-        sub_c = curr_frame[sy1:sy2:2, sx1:sx2:2, :3]
+        sub_p = prev_frame[sy1:sy2, sx1:sx2, :3]
+        sub_c = curr_frame[sy1:sy2, sx1:sx2, :3]
         m = np.abs(sub_p.astype(np.int16) - sub_c.astype(np.int16)).max(axis=2) > 3
         ys, xs = np.nonzero(m)
         if ys.size == 0:
             return (int(rx1), int(ry1), max(12, int(rx2 - rx1)), max(12, int(ry2 - ry1)))
-        px1 = sx1 + int(xs.min()) * 2
-        py1 = sy1 + int(ys.min()) * 2
-        px2 = min(fw, sx1 + (int(xs.max()) + 1) * 2)
-        py2 = min(fh, sy1 + (int(ys.max()) + 1) * 2)
+        px1 = max(0, sx1 + int(xs.min()) - 1)
+        py1 = max(0, sy1 + int(ys.min()) - 1)
+        px2 = min(fw, sx1 + int(xs.max()) + 2)
+        py2 = min(fh, sy1 + int(ys.max()) + 2)
         w, h = max(12, px2 - px1), max(12, py2 - py1)
         px2, py2 = min(fw, px1 + w), min(fh, py1 + h)
         return (int(px1), int(py1), int(px2 - px1), int(py2 - py1))
@@ -1341,9 +1351,6 @@ class VisionHostPipeline:
                     self.shared["bg_frame"] = curr_frame.copy()
                     return encode_jpeg_fn(curr_frame, quality)
                 all_cmds.extend(u_cmds)
-
-            # Guarantee 100% of the processed Macro Island is synced in prev_frame so no pixel ever sticks
-            self.prev_frame[my:my + mh, mx:mx + mw] = curr_frame[my:my + mh, mx:mx + mw]
 
         if all_cmds:
             if micro_count > 1 and self.shared.get("debug_mode", True):
