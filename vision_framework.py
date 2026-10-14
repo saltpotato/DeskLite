@@ -162,7 +162,7 @@ class StateCacheRecognizer(BaseRecognizer):
             ix1, iy1 = max(x, kx), max(y, ky)
             ix2, iy2 = min(x + w, kx + kw), min(y + h, ky + kh)
             iw, ih = ix2 - ix1, iy2 - iy1
-            if iw < 12 or ih < 12:
+            if iw < 48 or ih < 24:
                 continue
             inter_area = iw * ih
             if inter_area < 0.45 * (kw * kh) and inter_area < 0.45 * (w * h):
@@ -225,16 +225,19 @@ class StateCacheRecognizer(BaseRecognizer):
             r_prev_hash = fast_region_hash(rem_prev_roi, rx1, ry1)
             r_curr_hash = fast_region_hash(rem_curr_roi, rx1, ry1)
 
-            if r_prev_hash and r_prev_hash not in known:
-                cmds.append(pack_save_state(r_prev_hash, rx1, ry1, rw, rh))
-                self._commit_known(known, dirty_set, r_prev_hash, (rx1, ry1, rw, rh))
+            # Never cache small dynamic text/cursor remnants in StateCache
+            if rw >= 64 and rh >= 32:
+                if r_prev_hash and r_prev_hash not in known:
+                    cmds.append(pack_save_state(r_prev_hash, rx1, ry1, rw, rh))
+                    self._commit_known(known, dirty_set, r_prev_hash, (rx1, ry1, rw, rh))
 
             jpeg_bytes = ctx.encode_jpeg(rem_curr_roi, ctx.quality)
             cmds.append(pack_jpeg_patch(rx1, ry1, rw, rh, jpeg_bytes))
 
-            if r_curr_hash and r_curr_hash not in known:
-                cmds.append(pack_save_state(r_curr_hash, rx1, ry1, rw, rh))
-                self._commit_known(known, dirty_set, r_curr_hash, (rx1, ry1, rw, rh))
+            if rw >= 64 and rh >= 32:
+                if r_curr_hash and r_curr_hash not in known:
+                    cmds.append(pack_save_state(r_curr_hash, rx1, ry1, rw, rh))
+                    self._commit_known(known, dirty_set, r_curr_hash, (rx1, ry1, rw, rh))
 
             if ctx.shared.get("debug_mode", True):
                 logging.info(
@@ -244,7 +247,7 @@ class StateCacheRecognizer(BaseRecognizer):
             ctx.prev_frame[ry1:ry2, rx1:rx2] = rem_curr_roi
             return cmds
 
-        if prev_hash != curr_hash:
+        if prev_hash != curr_hash and w >= 64 and h >= 32:
             if prev_hash not in known:
                 ctx.shared["pending_pre_save"] = (prev_hash, x, y, w, h)
             ctx.shared["pending_post_save"] = (curr_hash, x, y, w, h)
@@ -536,7 +539,7 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
 
         if bad_ratio == 0.0:
             return []
-        if bad_ratio > 0.14:
+        if bad_ratio > 0.08:
             return None
 
         rects = []
@@ -545,18 +548,12 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
             dil = cv2.dilate(bad.astype(np.uint8), np.ones((3, 3), dtype=np.uint8))
             num_l, _, stats, _ = cv2.connectedComponentsWithStats(dil, connectivity=8)
 
-            # If there are many micro differences across the entire window, merge into a tight bounding box
-            if num_l > 12:
-                ys, xs = np.nonzero(bad)
-                if ys.size > 0:
-                    y1, y2 = int(ys.min()), int(ys.max()) + 1
-                    x1, x2 = int(xs.min()), int(xs.max()) + 1
-                    bbox_area = (x2 - x1) * (y2 - y1)
-                    if bbox_area <= (ow * oh * 0.22):
-                        return [(base_x + x1, base_y + y1, max(4, x2 - x1), max(4, y2 - y1))]
-                    return None
-                return []
+            if num_l > 4:
+                # If there are more than 3 separate residual islands, this is not a pure uniform scroll!
+                # Rejecting prevents blitting stationary UI into gaps and smearing text.
+                return None
 
+            raw_rects = []
             for lid in range(1, num_l):
                 gx = int(stats[lid, cv2.CC_STAT_LEFT])
                 gy = int(stats[lid, cv2.CC_STAT_TOP])
@@ -567,7 +564,31 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                 ry = max(0, min(oh - 4, gy))
                 rw = max(4, min(ow - rx, gw_c))
                 rh = max(4, min(oh - ry, gh_c))
-                rects.append((base_x + rx, base_y + ry, rw, rh))
+
+                # Sticky header / footer spans full container width so word gaps are never unpatched
+                if ry <= 36:
+                    rx, rw = 0, ow
+                elif ry + rh >= oh - 36:
+                    rx, rw = 0, ow
+
+                raw_rects.append([rx, ry, rw, rh])
+
+            # Merge any residual rects that overlap vertically so character/word gaps are covered
+            merged = []
+            for r in raw_rects:
+                was_merged = False
+                for m in merged:
+                    if max(r[1], m[1]) < min(r[1] + r[3], m[1] + m[3]) + 8:
+                        ux1 = min(r[0], m[0])
+                        uy1 = min(r[1], m[1])
+                        ux2 = max(r[0] + r[2], m[0] + m[2])
+                        uy2 = max(r[1] + r[3], m[1] + m[3])
+                        m[0], m[1], m[2], m[3] = ux1, uy1, ux2 - ux1, uy2 - uy1
+                        was_merged = True
+                        break
+                if not was_merged:
+                    merged.append(r)
+            rects = [(base_x + m[0], base_y + m[1], m[2], m[3]) for m in merged]
         else:
             ys, xs = np.nonzero(bad)
             if ys.size > 0:
@@ -576,7 +597,7 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                 rects.append((base_x + x1, base_y + y1, max(4, x2 - x1), max(4, y2 - y1)))
 
         total_area = sum(rw * rh for _, _, rw, rh in rects)
-        if total_area > (ow * oh * 0.28):
+        if total_area > (ow * oh * 0.18):
             return None
         return rects
 
@@ -1263,7 +1284,7 @@ class VisionHostPipeline:
         top_c = curr_frame[by1:t_end, bx1:bx2, :3]
         top_diff = np.abs(top_p.astype(np.int16) - top_c.astype(np.int16)).max(axis=2) > thresh
         t_ys, _ = np.nonzero(top_diff)
-        y1 = by1 + int(t_ys.min()) if t_ys.size > 0 else rx1
+        y1 = by1 + int(t_ys.min()) if t_ys.size > 0 else ry1
 
         b_start = max(0, by2 - 10)
         bot_p = prev_frame[b_start:by2, bx1:bx2, :3]
@@ -1286,7 +1307,11 @@ class VisionHostPipeline:
         _, r_xs = np.nonzero(right_diff)
         x2 = r_start + int(r_xs.max()) + 1 if r_xs.size > 0 else rx2
 
-        return (int(x1), int(y1), int(max(4, x2 - x1)), int(max(4, y2 - y1)))
+        x1 = max(0, min(fw - 4, x1))
+        y1 = max(0, min(fh - 4, y1))
+        x2 = max(x1 + 4, min(fw, x2))
+        y2 = max(y1 + 4, min(fh, y2))
+        return (int(x1), int(y1), int(x2 - x1), int(y2 - y1))
 
     @classmethod
     def _extract_dirty_rects(cls, prev_frame: np.ndarray, curr_frame: np.ndarray,
@@ -1406,11 +1431,11 @@ class VisionHostPipeline:
                     micro_count += 1
                     continue
 
-            # DENSE SURFACE FAST PATH (Videos / 3D Canvases / Window Fades / Dialogs):
-            # If not a scroll/window move, but dense (>= 25% dirty cells) and reasonably sized (>= 120x90),
-            # do NOT fragment into 8 micro-islands! Slicing a fading window/menu creates tearing
+            # DENSE SURFACE FAST PATH (Videos / 3D Canvases / Window Fades / Dialogs / Complex Scrolls):
+            # If not a simple scroll/window move, but active (>= 15% dirty cells) and reasonably sized (>= 120x90),
+            # do NOT fragment into 8 micro-islands! Slicing a fading window/menu/chat creates tearing
             # and burns CPU compressing separate JPEGs. Encode directly as 1 cohesive patch:
-            if mw >= 120 and mh >= 90 and density >= 0.25:
+            if mw >= 120 and mh >= 90 and density >= 0.15:
                 patch = curr_frame[my:my + mh, mx:mx + mw]
                 jpeg_bytes = encode_jpeg_fn(patch, quality)
                 all_cmds.append(pack_jpeg_patch(mx, my, mw, mh, jpeg_bytes))
