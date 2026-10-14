@@ -473,6 +473,18 @@ class HostService:
             elif msg_type == "reload_vision":
                 if hasattr(self.capturer, "reload_vision_pipeline"):
                     self.capturer.reload_vision_pipeline()
+                try:
+                    import input_controller
+                    importlib.reload(input_controller)
+                    self.input_controller = input_controller.InputController(
+                        self.capturer.width,
+                        self.capturer.height,
+                        self.capturer.left,
+                        self.capturer.top
+                    )
+                    logging.info("[HOT-RELOAD] 🎯 input_controller re-instantiated in host_service!")
+                except Exception as e:
+                    logging.debug(f"Error reloading input_controller: {e}")
                 self.force_frame = True
                 logging.info("Vision pipeline hot-reloaded via network control command.")
         except Exception as e:

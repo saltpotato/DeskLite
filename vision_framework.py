@@ -32,6 +32,20 @@ CMD_OVERLAY_META = 0x06
 CMD_UPDATE_BG = 0x07
 CMD_RESTORE_BG = 0x08
 
+# Hot-reload patch: If host process is running, dynamically update InputController with zero-DPI-distortion logic
+try:
+    import sys, importlib
+    if "input_controller" in sys.modules:
+        old_ic = sys.modules["input_controller"]
+        old_cls = getattr(old_ic, "InputController", None)
+        importlib.reload(old_ic)
+        new_cls = getattr(old_ic, "InputController", None)
+        if old_cls and new_cls:
+            old_cls.handle_event = new_cls.handle_event
+            logging.info("[HOT-RELOAD] 🎯 Patched existing InputController.handle_event with zero-DPI-distortion logic!")
+except Exception as e:
+    logging.debug(f"[HOT-RELOAD] input_controller hot-patch note: {e}")
+
 
 try:
     import cv2
@@ -1271,12 +1285,31 @@ class VisionHostPipeline:
             m = np.abs(sub_p.astype(np.int16) - sub_c.astype(np.int16)).max(axis=2) > thresh
             ys, xs = np.nonzero(m)
             if ys.size == 0:
-                return (int(rx1), int(ry1), max(4, int(rx2 - rx1)), max(4, int(ry2 - ry1)))
+                return (int(rx1), int(ry1), max(8, int(rx2 - rx1)), max(8, int(ry2 - ry1)))
             x1 = bx1 + int(xs.min())
             y1 = by1 + int(ys.min())
             x2 = bx1 + int(xs.max()) + 1
             y2 = by1 + int(ys.max()) + 1
-            return (int(x1), int(y1), int(max(4, x2 - x1)), int(max(4, y2 - y1)))
+
+            # Pad micro-rectangles (text cursor, typed letters) to at least 32x24 px
+            # and pad by ±6px on all sides so ClearType subpixel antialiasing and DCT blocks
+            # are fully enclosed without cutting vertical stripe artifacts across text lines.
+            min_w, min_h = 32, 24
+            cw = x2 - x1
+            ch = y2 - y1
+            pad_x = max(6, (min_w - cw + 1) // 2) if cw < min_w else 6
+            pad_y = max(4, (min_h - ch + 1) // 2) if ch < min_h else 4
+            x1 = max(0, x1 - pad_x)
+            y1 = max(0, y1 - pad_y)
+            x2 = min(fw, x2 + pad_x)
+            y2 = min(fh, y2 + pad_y)
+
+            # Align to even pixel boundaries for 4:2:0/4:2:2 chroma consistency
+            x1 = (x1 // 2) * 2
+            y1 = (y1 // 2) * 2
+            x2 = min(fw, ((x2 + 1) // 2) * 2)
+            y2 = min(fh, ((y2 + 1) // 2) * 2)
+            return (int(x1), int(y1), int(max(8, x2 - x1)), int(max(8, y2 - y1)))
 
         # Fast 4-border refinement (<0.01ms): inspects only narrow strips around the 4 coarse grid boundaries
         t_end = min(fh, by1 + 10)
@@ -1307,10 +1340,10 @@ class VisionHostPipeline:
         _, r_xs = np.nonzero(right_diff)
         x2 = r_start + int(r_xs.max()) + 1 if r_xs.size > 0 else rx2
 
-        x1 = max(0, min(fw - 4, x1))
-        y1 = max(0, min(fh - 4, y1))
-        x2 = max(x1 + 4, min(fw, x2))
-        y2 = max(y1 + 4, min(fh, y2))
+        x1 = max(0, min(fw - 8, (x1 // 2) * 2))
+        y1 = max(0, min(fh - 8, (y1 // 2) * 2))
+        x2 = max(x1 + 8, min(fw, ((x2 + 1) // 2) * 2))
+        y2 = max(y1 + 8, min(fh, ((y2 + 1) // 2) * 2))
         return (int(x1), int(y1), int(x2 - x1), int(y2 - y1))
 
     @classmethod
@@ -1444,11 +1477,11 @@ class VisionHostPipeline:
                 continue
 
             # Step 2: Not a scroll or whole-panel cache hit -> split Macro Island into tight Micro Islands
-            # (8px gap bridging isolates individual hovered buttons, menu items, icons, and cursors)
+            # (16px gap bridging keeps typing and cursor steps unified in a single clean box)
             gy1, gy2 = my // 4, min(mask.shape[0], (my + mh + 3) // 4)
             gx1, gx2 = mx // 4, min(mask.shape[1], (mx + mw + 3) // 4)
             sub_mask = mask[gy1:gy2, gx1:gx2]
-            micro_rects = self._extract_dirty_rects(self.prev_frame, curr_frame, sub_mask, gx1, gy1, fw, fh, bridge_cells=2, max_rects=8)
+            micro_rects = self._extract_dirty_rects(self.prev_frame, curr_frame, sub_mask, gx1, gy1, fw, fh, bridge_cells=4, max_rects=8)
 
             for u_rect in micro_rects:
                 micro_count += 1
@@ -1501,7 +1534,9 @@ class VisionHostPipeline:
             return None
 
         roi = curr_frame[y:y + h, x:x + w]
-        jpeg_bytes = encode_jpeg_fn(roi, quality)
+        # Boost JPEG quality for small UI controls / text typing so ClearType text is sharp and seam-free
+        patch_quality = max(quality, 85) if (w <= 160 and h <= 120) else quality
+        jpeg_bytes = encode_jpeg_fn(roi, patch_quality)
         cmds = []
 
         pre = self.shared.get("pending_pre_save")

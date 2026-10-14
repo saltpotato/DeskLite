@@ -87,6 +87,13 @@
       image-rendering: crisp-edges;
       image-rendering: pixelated;
     }
+    #viewport.scale-fill canvas {
+      width: 100% !important;
+      height: 100% !important;
+      max-width: none !important;
+      max-height: none !important;
+      object-fit: fill !important;
+    }
     .badge {
       display: inline-block;
       width: 8px;
@@ -184,6 +191,7 @@
       <input type="password" id="targetPwd" placeholder="Password" size="10">
       <button id="btnConnect" onclick="toggleConnect()">Connect</button>
       <button id="btnFullscreen" type="button" onclick="toggleFullscreen()">⛶ Fullscreen</button>
+      <button id="btnScaleMode" type="button" onclick="toggleScaleMode()" style="background:#374151;" title="Toggle between Fit (16:9 Aspect Ratio) and Stretch (100% Fill without Borders)">📐 Fit</button>
       <button id="btnPinToolbar" type="button" onclick="togglePinToolbar()" title="Pin / Unpin toolbar in fullscreen">📌 Pin</button>
       <div id="qualityControls" style="display:none; align-items:center; gap:4px;">
         <div style="height: 20px; width: 1px; background: #444; margin: 0 2px;"></div>
@@ -417,6 +425,28 @@
         if (btn) btn.innerText = "⛶ Fullscreen";
       }
     });
+
+    let scaleFillMode = false;
+    function toggleScaleMode() {
+      scaleFillMode = !scaleFillMode;
+      const vp = document.getElementById("viewport");
+      const btn = document.getElementById("btnScaleMode");
+      if (vp) vp.classList.toggle("scale-fill", scaleFillMode);
+      if (btn) {
+        btn.innerText = scaleFillMode ? "↔️ Fill" : "📐 Fit";
+        btn.style.background = scaleFillMode ? "#2563eb" : "#374151";
+      }
+      try {
+        localStorage.setItem("desklite_scale_mode", scaleFillMode ? "fill" : "fit");
+      } catch (e) {}
+    }
+
+    // Restore saved scale mode
+    try {
+      if (localStorage.getItem("desklite_scale_mode") === "fill") {
+        toggleScaleMode();
+      }
+    } catch (e) {}
 
     function toggleConnect() {
       if (isConnected || shouldReconnect) {

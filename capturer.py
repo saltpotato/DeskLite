@@ -63,7 +63,7 @@ class ScreenCapturer:
         self._update_monitor()
 
     def reload_vision_pipeline(self) -> bool:
-        """Dynamically reloads `vision_framework.py` in-memory without restarting the main process."""
+        """Dynamically reloads `vision_framework.py` and `input_controller.py` in-memory without restarting the main process."""
         try:
             import vision_framework
             importlib.reload(vision_framework)
@@ -72,6 +72,18 @@ class ScreenCapturer:
             if os.path.exists(self.vision_path):
                 self.last_vision_mtime = os.path.getmtime(self.vision_path)
             logging.info("[HOT-RELOAD] 🚀 vision_framework.py successfully reloaded in-memory!")
+            try:
+                import sys
+                if "input_controller" in sys.modules:
+                    old_ic = sys.modules["input_controller"]
+                    old_cls = getattr(old_ic, "InputController", None)
+                    importlib.reload(old_ic)
+                    new_cls = getattr(old_ic, "InputController", None)
+                    if old_cls and new_cls:
+                        old_cls.handle_event = new_cls.handle_event
+                    logging.info("[HOT-RELOAD] 🎯 input_controller.py reloaded and patched!")
+            except Exception as e:
+                logging.debug(f"[HOT-RELOAD] input_controller reload note: {e}")
             return True
         except Exception as e:
             logging.error(f"[HOT-RELOAD] ❌ Failed to reload vision_framework: {e}")

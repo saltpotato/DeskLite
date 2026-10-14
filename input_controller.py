@@ -1,7 +1,10 @@
 import sys
 import ctypes
 import logging
-from common import ensure_desktop_access, is_admin
+from common import ensure_desktop_access, is_admin, enable_dpi_awareness
+
+if sys.platform == "win32":
+    enable_dpi_awareness()
 
 try:
     import pynput
@@ -59,10 +62,14 @@ if HAS_PYNPUT:
 class InputController:
     def __init__(self, screen_width, screen_height, screen_left=0, screen_top=0):
         ensure_desktop_access()
+        if sys.platform == "win32":
+            enable_dpi_awareness()
         self.width = screen_width
         self.height = screen_height
         self.left = screen_left
         self.top = screen_top
+        self.last_x = screen_left
+        self.last_y = screen_top
         self.mouse = None
         self.keyboard = None
         if HAS_PYNPUT:
@@ -88,39 +95,34 @@ class InputController:
             self.last_y = self.top + int(ny * self.height)
             if sys.platform == "win32":
                 ctypes.windll.user32.SetCursorPos(self.last_x, self.last_y)
-                scr_w = max(1, ctypes.windll.user32.GetSystemMetrics(0))
-                scr_h = max(1, ctypes.windll.user32.GetSystemMetrics(1))
-                norm_x = int(self.last_x * 65535 / scr_w)
-                norm_y = int(self.last_y * 65535 / scr_h)
-                ctypes.windll.user32.mouse_event(0x8000 | 0x0001, norm_x, norm_y, 0, 0)
+                # Notify Windows mouse subsystem of motion at exact cursor position
+                ctypes.windll.user32.mouse_event(0x0001, 0, 0, 0, 0)
             else:
                 self.mouse.position = (self.last_x, self.last_y)
 
         elif evt_type == "mouse_down":
             btn = event.get("button", "left")
+            if "x" in event and "y" in event:
+                self.last_x = self.left + int(event["x"] * self.width)
+                self.last_y = self.top + int(event["y"] * self.height)
             if sys.platform == "win32":
-                # Ensure cursor position is synced right before click
                 ctypes.windll.user32.SetCursorPos(getattr(self, "last_x", 0), getattr(self, "last_y", 0))
                 flag = 0x0002 if btn == "left" else (0x0008 if btn == "right" else 0x0020)
-                # Send with MOUSEEVENTF_ABSOLUTE to guarantee it hits the active elevated control
-                scr_w = max(1, ctypes.windll.user32.GetSystemMetrics(0))
-                scr_h = max(1, ctypes.windll.user32.GetSystemMetrics(1))
-                norm_x = int(getattr(self, "last_x", 0) * 65535 / scr_w)
-                norm_y = int(getattr(self, "last_y", 0) * 65535 / scr_h)
-                ctypes.windll.user32.mouse_event(flag | 0x8000 | 0x0001, norm_x, norm_y, 0, 0)
+                # Send mouse button down at current pixel position without any DPI divisor distortion
+                ctypes.windll.user32.mouse_event(flag, 0, 0, 0, 0)
             else:
                 p_btn = BUTTONS.get(btn, Button.left)
                 self.mouse.press(p_btn)
 
         elif evt_type == "mouse_up":
             btn = event.get("button", "left")
+            if "x" in event and "y" in event:
+                self.last_x = self.left + int(event["x"] * self.width)
+                self.last_y = self.top + int(event["y"] * self.height)
             if sys.platform == "win32":
+                ctypes.windll.user32.SetCursorPos(getattr(self, "last_x", 0), getattr(self, "last_y", 0))
                 flag = 0x0004 if btn == "left" else (0x0010 if btn == "right" else 0x0040)
-                scr_w = max(1, ctypes.windll.user32.GetSystemMetrics(0))
-                scr_h = max(1, ctypes.windll.user32.GetSystemMetrics(1))
-                norm_x = int(getattr(self, "last_x", 0) * 65535 / scr_w)
-                norm_y = int(getattr(self, "last_y", 0) * 65535 / scr_h)
-                ctypes.windll.user32.mouse_event(flag | 0x8000 | 0x0001, norm_x, norm_y, 0, 0)
+                ctypes.windll.user32.mouse_event(flag, 0, 0, 0, 0)
             else:
                 p_btn = BUTTONS.get(btn, Button.left)
                 self.mouse.release(p_btn)
@@ -128,17 +130,16 @@ class InputController:
         elif evt_type == "mouse_click":
             btn = event.get("button", "left")
             count = event.get("count", 1)
+            if "x" in event and "y" in event:
+                self.last_x = self.left + int(event["x"] * self.width)
+                self.last_y = self.top + int(event["y"] * self.height)
             if sys.platform == "win32":
                 ctypes.windll.user32.SetCursorPos(getattr(self, "last_x", 0), getattr(self, "last_y", 0))
                 down_flag = 0x0002 if btn == "left" else (0x0008 if btn == "right" else 0x0020)
                 up_flag = 0x0004 if btn == "left" else (0x0010 if btn == "right" else 0x0040)
-                scr_w = max(1, ctypes.windll.user32.GetSystemMetrics(0))
-                scr_h = max(1, ctypes.windll.user32.GetSystemMetrics(1))
-                norm_x = int(getattr(self, "last_x", 0) * 65535 / scr_w)
-                norm_y = int(getattr(self, "last_y", 0) * 65535 / scr_h)
                 for _ in range(count):
-                    ctypes.windll.user32.mouse_event(down_flag | 0x8000 | 0x0001, norm_x, norm_y, 0, 0)
-                    ctypes.windll.user32.mouse_event(up_flag | 0x8000 | 0x0001, norm_x, norm_y, 0, 0)
+                    ctypes.windll.user32.mouse_event(down_flag, 0, 0, 0, 0)
+                    ctypes.windll.user32.mouse_event(up_flag, 0, 0, 0, 0)
             else:
                 p_btn = BUTTONS.get(btn, Button.left)
                 self.mouse.click(p_btn, count)
