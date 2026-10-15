@@ -1250,6 +1250,8 @@ class VisionHostPipeline:
             WindowMove2DRecognizer(),
         ]
         self.prev_frame = None
+        self._delta_frames_since_keyframe = 0
+        self._keyframe_interval = 120  # Periodically discard lossy JPEG prediction drift.
         self.shared = {
             "known_states": collections.OrderedDict(),
             "dirty_states": set(),
@@ -1270,6 +1272,7 @@ class VisionHostPipeline:
 
     def reset(self):
         self.prev_frame = None
+        self._delta_frames_since_keyframe = 0
         self.shared["bg_frame"] = None
         self.shared["known_states"].clear()
         self.shared["dirty_states"].clear()
@@ -1483,17 +1486,31 @@ class VisionHostPipeline:
         fh, fw = curr_frame.shape[:2]
         # Note: `force=True` from input events wakes up the capture grabber, but must NOT wipe out
         # delta encoding when `self.prev_frame` is already valid (connection/quality resets call `reset()`).
-        if self.prev_frame is None or self.prev_frame.shape != curr_frame.shape:
+        if (self.prev_frame is None or self.prev_frame.shape != curr_frame.shape
+                or self._delta_frames_since_keyframe >= self._keyframe_interval):
+            # The host uses original RGB frames; the viewer renders lossy JPEGs.
+            # A fresh keyframe bounds any accumulated disagreement between them.
+            self.reset()
             self.prev_frame = curr_frame.copy()
             self.shared["bg_frame"] = curr_frame.copy()
             return encode_jpeg_fn(curr_frame, quality)
 
-        # Fast 4x4 grid diff with 3-LSB noise floor to ignore invisible DWM dithering
-        g_prev = self.prev_frame[::4, ::4, :3]
-        g_curr = curr_frame[::4, ::4, :3]
-        mask = np.abs(g_prev.astype(np.int16) - g_curr.astype(np.int16)).max(axis=2) > 3
+        # Detect changes anywhere in each 4x4 cell, not only its top-left sample.
+        # Thin lines, scrollbars and caret updates otherwise disappear entirely.
+        pixel_delta = np.abs(
+            self.prev_frame[:, :, :3].astype(np.int16) -
+            curr_frame[:, :, :3].astype(np.int16)
+        ).max(axis=2) > 3
+        pad_h = (-fh) % 4
+        pad_w = (-fw) % 4
+        if pad_h or pad_w:
+            pixel_delta = np.pad(pixel_delta, ((0, pad_h), (0, pad_w)),
+                                 mode="constant", constant_values=False)
+        mask = pixel_delta.reshape((fh + pad_h) // 4, 4,
+                                   (fw + pad_w) // 4, 4).any(axis=(1, 3))
         if not np.any(mask):
             return None
+        self._delta_frames_since_keyframe += 1
 
         # Step 1: Extract Macro Islands (32px gap bridging keeps scrolling pages & dialogs intact)
         macro_rects = self._extract_dirty_rects(self.prev_frame, curr_frame, mask, 0, 0, fw, fh, bridge_cells=8, max_rects=8)
@@ -1561,6 +1578,7 @@ class VisionHostPipeline:
                 )
                 if u_cmds is None:
                     # Single massive un-cached screen change (>= 75% of screen area) -> send full keyframe
+                    self.reset()
                     self.prev_frame = curr_frame.copy()
                     self.shared["bg_frame"] = curr_frame.copy()
                     return encode_jpeg_fn(curr_frame, quality)
@@ -1753,6 +1771,13 @@ class VisionViewerDecoder:
 
     def on_full_frame(self, byte_len: int = 0, width: int = 1920, height: int = 1080, base_qimage=None):
         """Called when a full JPEG keyframe arrives."""
+        # A keyframe starts a new prediction epoch. Cached rectangles belong to
+        # the old (potentially lossy) canvas and must not be replayed afterward.
+        self.state_cache.clear()
+        self.dirty_hashes.clear()
+        self.virtual_y = 0
+        self.virtual_x = 0
+        self.dirty_below = False
         self.stats_jpeg_patches += 1
         if base_qimage is not None and not base_qimage.isNull():
             self.bg_surface = base_qimage.copy()
