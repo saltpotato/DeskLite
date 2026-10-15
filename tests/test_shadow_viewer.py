@@ -30,6 +30,7 @@ class ShadowViewerTests(unittest.TestCase):
     def test_imperfect_motion_uses_lossless_residual(self):
         self.shadow.process(self.original, b"JPEG")
         target = np.roll(self.original, 3, axis=1)
+        target[20, 20] = (10, 210, 14)  # Change within the moved window.
         packet = pack_vf_packet([pack_transform_rect(0, 0, 90, 64, 3, 0, 90, 64)])
         corrected = self.shadow.process(target, packet)
         self.assertTrue(corrected.startswith(b"VF"))
