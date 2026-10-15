@@ -228,6 +228,7 @@ class RemoteDesktopViewer(QWidget):
         self.last_mouse_time = 0.0
         self.last_clipboard = ""
         self.frame_queue = collections.deque(maxlen=30)
+        self.awaiting_keyframe = False
 
         self.frame_ready_sig.connect(self._process_latest_frame)
         self.status_sig.connect(self._update_status_label)
@@ -406,8 +407,21 @@ class RemoteDesktopViewer(QWidget):
         self._enqueue_frame(message)
 
     def _enqueue_frame(self, frame_bytes):
-        if frame_bytes[:2] not in (b"DL", b"VF"):
+        is_delta = frame_bytes[:2] in (b"DL", b"VF")
+        if self.awaiting_keyframe:
+            if is_delta:
+                return
             self.frame_queue.clear()
+            self.awaiting_keyframe = False
+        elif not is_delta:
+            self.frame_queue.clear()
+
+        if is_delta and len(self.frame_queue) == self.frame_queue.maxlen:
+            self.frame_queue.clear()
+            self.awaiting_keyframe = True
+            self.send_input({"event": "request_keyframe"})
+            return
+
         self.frame_queue.append(frame_bytes)
         if not self.render_pending:
             self.render_pending = True
@@ -682,5 +696,4 @@ class RemoteDesktopViewer(QWidget):
                         QTimer.singleShot(150, self.master_ref.shutdown_and_exit)
             except Exception:
                 pass
-
 

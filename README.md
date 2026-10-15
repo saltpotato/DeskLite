@@ -83,6 +83,7 @@ The compiled binary is placed in `server/web/download/DeskLite.exe` so it can be
    - Your **9-digit ID** (e.g. `384 192 741`) and **One-Time Password** are displayed on the left card.
    - Click **🔄 New** at any time to generate a new ID or password.
    - Use the UAC button at the bottom to toggle UAC prompt visibility on the normal desktop while keeping UAC confirmation prompts active (`ConsentPromptBehaviorAdmin = 5`).
+   - Open **⚙️ Processing…** to choose **Raw capture + JPEG** as a baseline without Vision processing, or enable/disable the individual state-cache, background-restore, animation, scrolling, and window-movement recognizers. DXGI is used when available on Windows; other platforms use their supported capture backend (MSS on macOS). Shadow repair always runs in Vision mode.
 3. **Control a Remote PC (Viewer / Browser):**
    - Enter the **Partner ID** and password on the right card of the desktop app (or in your browser at `http://YOUR_SERVER_IP:8765`) and click **Connect**.
    - After the initial handshake, the status bar automatically switches to **`🟢 Direct P2P`** or **`🟢 Direct P2P WebRTC`** (`0 KB/s on VPS`).

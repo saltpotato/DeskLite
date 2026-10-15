@@ -24,7 +24,8 @@ except ImportError:
 from PIL import Image
 
 class ScreenCapturer:
-    def __init__(self, monitor_index=1, quality=75, scale=1.0):
+    def __init__(self, monitor_index=1, quality=75, scale=1.0,
+                 vision_enabled=True, vision_algorithms=None):
         ensure_desktop_access()
         self.quality = quality
         self.scale = scale
@@ -53,12 +54,23 @@ class ScreenCapturer:
         self.last_vision_mtime = os.path.getmtime(self.vision_path) if os.path.exists(self.vision_path) else 0.0
         self.last_reload_check = 0.0
 
+        self.vision_enabled = bool(vision_enabled)
+        self.vision_algorithms = (tuple(vision_algorithms)
+                                  if isinstance(vision_algorithms, (list, tuple, set))
+                                  else None)
+
         try:
             import vision_framework
             self.vision_pipeline = vision_framework.VisionHostPipeline()
+            if self.vision_algorithms is not None:
+                self.vision_pipeline.set_enabled_plugins(self.vision_algorithms)
         except Exception as e:
             logging.error(f"VisionHostPipeline init failed: {e}")
             self.vision_pipeline = None
+
+        self.shadow_viewer = None
+        if self.vision_enabled:
+            self._create_shadow_viewer()
 
         self._update_monitor()
 
@@ -68,6 +80,10 @@ class ScreenCapturer:
             import vision_framework
             importlib.reload(vision_framework)
             self.vision_pipeline = vision_framework.VisionHostPipeline()
+            if self.vision_algorithms is not None:
+                self.vision_pipeline.set_enabled_plugins(self.vision_algorithms)
+            if self.shadow_viewer is not None:
+                self.shadow_viewer.reset()
             self.last_grid = None
             if os.path.exists(self.vision_path):
                 self.last_vision_mtime = os.path.getmtime(self.vision_path)
@@ -119,6 +135,8 @@ class ScreenCapturer:
     def reset_vision_state(self):
         if self.vision_pipeline is not None:
             self.vision_pipeline.reset()
+        if self.shadow_viewer is not None:
+            self.shadow_viewer.reset()
 
     def notify_input(self, evt):
         if evt.get("event") in ("reload_vision", "hot_reload"):
@@ -197,6 +215,25 @@ class ScreenCapturer:
         self.last_grid = None  # Force next frame to be sent
         self.reset_vision_state()
 
+    def _create_shadow_viewer(self):
+        from shadow_viewer import ShadowViewer
+        self.shadow_viewer = ShadowViewer()
+
+    def update_processing_settings(self, vision_enabled=True, vision_algorithms=None):
+        self.vision_enabled = bool(vision_enabled)
+        if (self.vision_pipeline is not None
+                and isinstance(vision_algorithms, (list, tuple, set))):
+            self.vision_algorithms = tuple(vision_algorithms)
+            self.vision_pipeline.set_enabled_plugins(self.vision_algorithms)
+        elif vision_algorithms is None:
+            self.vision_algorithms = None
+        if self.vision_enabled and self.shadow_viewer is None:
+            self._create_shadow_viewer()
+        elif not self.vision_enabled:
+            self.shadow_viewer = None
+        self.last_grid = None
+        self.reset_vision_state()
+
     def get_cursor_pos(self):
         """Returns cursor coordinates relative to monitor."""
         if sys.platform == "win32":
@@ -271,7 +308,7 @@ class ScreenCapturer:
 
                 # Only run the CPU uint32 grid diff check when using the GDI fallback path!
                 # When from_dxgi_update is True, the DXGI Desktop Duplication API already guaranteed a GPU change.
-                if not from_dxgi_update:
+                if self.vision_enabled and not from_dxgi_update:
                     fh, fw = img_np.shape[:2]
                     grid = img_np.view(np.uint32).reshape(fh, fw)[::4, ::4]
                     if not force and self.last_grid is not None and self.last_grid.shape == grid.shape:
@@ -286,8 +323,28 @@ class ScreenCapturer:
                     new_h = max(100, int(self.height * self.scale))
                     img_np = cv2.resize(img_np, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
+                if not self.vision_enabled:
+                    return self._encode_jpeg(img_np, self.quality)
+
                 if self.vision_pipeline is not None:
-                    return self.vision_pipeline.encode_frame(img_np, force, self._encode_jpeg, self.quality)
+                    packet = self.vision_pipeline.encode_frame(img_np, force, self._encode_jpeg, self.quality)
+                    if self.shadow_viewer is not None:
+                        try:
+                            output = self.shadow_viewer.process(img_np, packet)
+                            # The shadow may replace a costly delta with a full
+                            # lossless keyframe. Client caches were cleared then,
+                            # so the host's prediction/cache epoch must also end.
+                            if (output is not None and output.startswith(b"\\x89PNG")
+                                    and packet is not None and packet.startswith(b"VF")):
+                                self.vision_pipeline.reset()
+                            return output
+                        except Exception:
+                            # Never emit an unvalidated delta after a shadow failure.
+                            logging.exception("Shadow repair failed; resetting encoder")
+                            self.vision_pipeline.reset()
+                            self.shadow_viewer.reset()
+                            return self.shadow_viewer._new_keyframe(img_np)
+                    return packet
 
                 return self._encode_jpeg(img_np, self.quality)
             except Exception:
@@ -308,6 +365,3 @@ class ScreenCapturer:
             return buf.getvalue()
         except Exception:
             return None
-
-
-

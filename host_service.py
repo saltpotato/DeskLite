@@ -47,7 +47,9 @@ def get_local_ipv4_addresses():
 
 
 class HostService:
-    def __init__(self, relay_url, my_id, my_password, quality=55, max_fps=30, scale=0.75, status_callback=None):
+    def __init__(self, relay_url, my_id, my_password, quality=55, max_fps=30,
+                 scale=0.75, status_callback=None, vision_enabled=True,
+                 vision_algorithms=None):
         self.relay_url = relay_url
         self.my_id = my_id
         self.my_password = my_password
@@ -74,7 +76,12 @@ class HostService:
         self.stream_task = None
         self.clip_task = None
 
-        self.capturer = ScreenCapturer(quality=self.quality, scale=self.scale)
+        self.capturer = ScreenCapturer(
+            quality=self.quality,
+            scale=self.scale,
+            vision_enabled=vision_enabled,
+            vision_algorithms=vision_algorithms,
+        )
         self.input_controller = InputController(
             self.capturer.width,
             self.capturer.height,
@@ -291,19 +298,18 @@ class HostService:
             logging.warning(f"WebRTC P2P negotiation failed (staying on fallback): {e}")
 
     def _send_webrtc_frame(self, channel, frame_bytes):
-        """Sends a binary JPEG frame over WebRTC DataChannel, splitting into 48KB chunks if needed."""
+        """Sends a binary frame over WebRTC, returning True when backpressure drops it."""
         if getattr(channel, "readyState", "") != "open":
             self.webrtc_channels.discard(channel)
             self._update_session_status()
-            return
+            return False
         if getattr(channel, "bufferedAmount", 0) > 256 * 1024:
-            # Drop frame if UDP buffer is backed up to prevent latency spikes
-            return
+            return True
 
         max_chunk = 48000
         if len(frame_bytes) <= max_chunk:
             channel.send(frame_bytes)
-            return
+            return False
 
         self.frame_seq = (self.frame_seq + 1) & 0xFFFF
         total = (len(frame_bytes) + max_chunk - 1) // max_chunk
@@ -311,6 +317,7 @@ class HostService:
             chunk = frame_bytes[idx * max_chunk:(idx + 1) * max_chunk]
             header = b"DC" + struct.pack(">HBB", self.frame_seq, idx, total)
             channel.send(header + chunk)
+        return False
 
     async def _stream_frames(self):
         interval = 1.0 / max(1, self.max_fps)
@@ -347,7 +354,11 @@ class HostService:
                 # 2. Send to Direct WebRTC P2P DataChannel viewers
                 for channel in list(self.webrtc_channels):
                     try:
-                        self._send_webrtc_frame(channel, frame_bytes)
+                        if self._send_webrtc_frame(channel, frame_bytes):
+                            # Delta packets depend on every previous packet; restart
+                            # the shared encoder epoch before sending another one.
+                            self.capturer.reset_vision_state()
+                            self.force_frame = True
                     except Exception:
                         self.webrtc_channels.discard(channel)
                         self._update_session_status()
@@ -456,10 +467,14 @@ class HostService:
 
             elif msg_type == "input":
                 evt_data = data.get("data", {})
-                self.capturer.notify_input(evt_data)
-                self.input_controller.handle_event(evt_data)
-                if evt_data.get("event") != "mouse_move":
+                if evt_data.get("event") == "request_keyframe":
+                    self.capturer.reset_vision_state()
                     self.force_frame = True
+                else:
+                    self.capturer.notify_input(evt_data)
+                    self.input_controller.handle_event(evt_data)
+                    if evt_data.get("event") != "mouse_move":
+                        self.force_frame = True
                 self._ensure_background_tasks()
 
             elif msg_type == "set_quality":
@@ -469,6 +484,10 @@ class HostService:
                 )
                 self.force_frame = True
                 logging.info(f"Quality profile updated: scale={self.capturer.scale}, q={self.capturer.quality}")
+
+            elif msg_type == "request_keyframe":
+                self.capturer.reset_vision_state()
+                self.force_frame = True
 
             elif msg_type == "reload_vision":
                 if hasattr(self.capturer, "reload_vision_pipeline"):

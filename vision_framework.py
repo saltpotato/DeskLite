@@ -1242,13 +1242,14 @@ class VisionHostPipeline:
     Maintains `self.prev_frame` in lockstep with the Viewer's reconstructed canvas.
     """
     def __init__(self):
-        self.plugins: list[BaseRecognizer] = [
+        self._all_plugins: list[BaseRecognizer] = [
             StateCacheRecognizer(),
             BackgroundRestoreRecognizer(),
             AnimationCycleRecognizer(),
             Scroll2DAndSliderRecognizer(),
             WindowMove2DRecognizer(),
         ]
+        self.plugins = list(self._all_plugins)
         self.prev_frame = None
         self._delta_frames_since_keyframe = 0
         self._keyframe_interval = 120  # Periodically discard lossy JPEG prediction drift.
@@ -1268,7 +1269,14 @@ class VisionHostPipeline:
         }
 
     def register_plugin(self, plugin: BaseRecognizer):
+        self._all_plugins.append(plugin)
         self.plugins.append(plugin)
+
+    def set_enabled_plugins(self, enabled_names):
+        enabled_names = set(enabled_names)
+        self.plugins = [plugin for plugin in self._all_plugins
+                        if plugin.name in enabled_names]
+        self.reset()
 
     def reset(self):
         self.prev_frame = None
@@ -1497,17 +1505,32 @@ class VisionHostPipeline:
 
         # Detect changes anywhere in each 4x4 cell, not only its top-left sample.
         # Thin lines, scrollbars and caret updates otherwise disappear entirely.
-        pixel_delta = np.abs(
-            self.prev_frame[:, :, :3].astype(np.int16) -
-            curr_frame[:, :, :3].astype(np.int16)
-        ).max(axis=2) > 3
+        if HAS_CV2:
+            diff = cv2.absdiff(self.prev_frame, curr_frame)
+            if diff.shape[2] >= 4:
+                unchanged = cv2.inRange(diff, (0, 0, 0, 0), (3, 3, 3, 255))
+            else:
+                unchanged = cv2.inRange(diff[:, :, :3], (0, 0, 0), (3, 3, 3))
+            pixel_delta = unchanged == 0
+        else:
+            pixel_delta = np.abs(
+                self.prev_frame[:, :, :3].astype(np.int16) -
+                curr_frame[:, :, :3].astype(np.int16)
+            ).max(axis=2) > 3
         pad_h = (-fh) % 4
         pad_w = (-fw) % 4
         if pad_h or pad_w:
             pixel_delta = np.pad(pixel_delta, ((0, pad_h), (0, pad_w)),
                                  mode="constant", constant_values=False)
-        mask = pixel_delta.reshape((fh + pad_h) // 4, 4,
-                                   (fw + pad_w) // 4, 4).any(axis=(1, 3))
+        if HAS_CV2:
+            mask = cv2.dilate(
+                pixel_delta.astype(np.uint8),
+                np.ones((4, 4), dtype=np.uint8),
+                anchor=(0, 0),
+            )[::4, ::4].astype(bool)
+        else:
+            mask = pixel_delta.reshape((fh + pad_h) // 4, 4,
+                                       (fw + pad_w) // 4, 4).any(axis=(1, 3))
         if not np.any(mask):
             return None
         self._delta_frames_since_keyframe += 1
@@ -1598,9 +1621,18 @@ class VisionHostPipeline:
         VF binary command chunks, or `None` if the rect covers >= 75% of the screen.
         """
         x, y, w, h = dirty_rect
-        sub_p = prev_frame[y:y + h:2, x:x + w:2, :3]
-        sub_c = curr_frame[y:y + h:2, x:x + w:2, :3]
-        if not np.any(np.abs(sub_p.astype(np.int16) - sub_c.astype(np.int16)).max(axis=2) > 3):
+        sub_p = prev_frame[y:y + h, x:x + w]
+        sub_c = curr_frame[y:y + h, x:x + w]
+        if HAS_CV2:
+            diff = cv2.absdiff(sub_p, sub_c)
+            if diff.shape[2] >= 4:
+                changed = cv2.inRange(diff, (0, 0, 0, 0), (3, 3, 3, 255)) == 0
+            else:
+                changed = cv2.inRange(diff[:, :, :3], (0, 0, 0), (3, 3, 3)) == 0
+        else:
+            changed = np.abs(sub_p[:, :, :3].astype(np.int16) -
+                             sub_c[:, :, :3].astype(np.int16)).max(axis=2) > 3
+        if not np.any(changed):
             return []
 
         if run_plugins:
@@ -1770,7 +1802,7 @@ class VisionViewerDecoder:
         })
 
     def on_full_frame(self, byte_len: int = 0, width: int = 1920, height: int = 1080, base_qimage=None):
-        """Called when a full JPEG keyframe arrives."""
+        """Called when a full-frame keyframe arrives."""
         # A keyframe starts a new prediction epoch. Cached rectangles belong to
         # the old (potentially lossy) canvas and must not be replayed afterward.
         self.state_cache.clear()
