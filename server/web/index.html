@@ -749,7 +749,7 @@
               cCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
               vfStateCache.delete(sid);
               vfStateCache.set(sid, c);
-              while (vfStateCache.size > 48) {
+              while (vfStateCache.size > 256) {
                 const firstKey = vfStateCache.keys().next().value;
                 vfStateCache.delete(firstKey);
               }
@@ -811,7 +811,11 @@
             const jlen = view.getUint32(offset + 9, false);
             offset += 13;
             if (offset + jlen <= buf.byteLength) {
-              const blob = new Blob([new Uint8Array(buf, offset, jlen)], { type: "image/jpeg" });
+              const bytes = new Uint8Array(buf, offset, jlen);
+              const mime = bytes.length >= 8 && bytes[0] === 0x89 &&
+                bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+                ? "image/png" : "image/jpeg";
+              const blob = new Blob([bytes], { type: mime });
               offset += jlen;
               try {
                 const bmp = await createImageBitmap(blob, { imageOrientation: "none", premultiplyAlpha: "none", colorSpaceConversion: "none" });
@@ -895,7 +899,11 @@
               recordDebugRect(dx, dy, dw, dh, "jpeg", `NET JPEG (${(jlen / 1024).toFixed(1)} KB)`);
             } catch (e) {}
           } else {
-            const blob = new Blob([buf], { type: "image/jpeg" });
+            const imageData = new Uint8Array(buf);
+            const mime = imageData.length >= 8 && imageData[0] === 0x89 &&
+              imageData[1] === 0x50 && imageData[2] === 0x4e && imageData[3] === 0x47
+              ? "image/png" : "image/jpeg";
+            const blob = new Blob([buf], { type: mime });
             try {
               const bmp = await createImageBitmap(blob, { imageOrientation: "none", premultiplyAlpha: "none", colorSpaceConversion: "none" });
               if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
@@ -903,6 +911,8 @@
                 canvas.height = bmp.height;
               }
               ctx.drawImage(bmp, 0, 0);
+              // Full-frame packets begin a new prediction/cache epoch.
+              vfStateCache.clear();
               vfBgCanvas.width = bmp.width;
               vfBgCanvas.height = bmp.height;
               vfBgCtx.drawImage(bmp, 0, 0);
