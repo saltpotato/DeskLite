@@ -59,10 +59,19 @@ class ShadowViewer:
         residual detection. A single bounding PNG patch also repairs transparent
         windows, antialiasing, compositor shadows and incorrect movement guesses.
         """
-        if packet is None:
-            return None
         if target.ndim != 3 or target.shape[2] < 3:
             return packet
+        if packet is None:
+            # The motion recognizer may declare a frame unchanged even though
+            # visually significant pixels were omitted by a confidence threshold.
+            # Never leave those differences permanently stranded on the client.
+            if self.canvas is None or self.canvas.isNull():
+                return self._new_keyframe(target)
+            if self.canvas.width() != target.shape[1] or self.canvas.height() != target.shape[0]:
+                return self._new_keyframe(target)
+            if not np.any(self._pixels() != target[:, :, :3]):
+                return None
+            packet = pack_vf_packet([])
         height, width = target.shape[:2]
 
         if (self.canvas is None or self.canvas.isNull()
