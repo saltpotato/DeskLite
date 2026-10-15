@@ -4,5 +4,14 @@
   "my_password": "secret",
   "quality": 60,
   "max_fps": 30,
-  "scale": 0.85
+  "scale": 0.85,
+  "vision_enabled": true,
+  "vision_algorithms": [
+    "StateCacheRecognizer",
+    "BackgroundRestoreRecognizer",
+    "AnimationCycleRecognizer",
+    "Scroll2DAndSliderRecognizer",
+    "WindowMove2DRecognizer"
+  ],
+  "shadow_repair": true
 }

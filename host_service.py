@@ -47,7 +47,9 @@ def get_local_ipv4_addresses():
 
 
 class HostService:
-    def __init__(self, relay_url, my_id, my_password, quality=55, max_fps=30, scale=0.75, status_callback=None):
+    def __init__(self, relay_url, my_id, my_password, quality=55, max_fps=30,
+                 scale=0.75, status_callback=None, vision_enabled=True,
+                 vision_algorithms=None, shadow_repair=True):
         self.relay_url = relay_url
         self.my_id = my_id
         self.my_password = my_password
@@ -74,7 +76,13 @@ class HostService:
         self.stream_task = None
         self.clip_task = None
 
-        self.capturer = ScreenCapturer(quality=self.quality, scale=self.scale)
+        self.capturer = ScreenCapturer(
+            quality=self.quality,
+            scale=self.scale,
+            vision_enabled=vision_enabled,
+            vision_algorithms=vision_algorithms,
+            shadow_repair=shadow_repair,
+        )
         self.input_controller = InputController(
             self.capturer.width,
             self.capturer.height,

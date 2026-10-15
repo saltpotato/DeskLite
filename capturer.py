@@ -24,7 +24,8 @@ except ImportError:
 from PIL import Image
 
 class ScreenCapturer:
-    def __init__(self, monitor_index=1, quality=75, scale=1.0):
+    def __init__(self, monitor_index=1, quality=75, scale=1.0,
+                 vision_enabled=True, vision_algorithms=None, shadow_repair=True):
         ensure_desktop_access()
         self.quality = quality
         self.scale = scale
@@ -56,14 +57,17 @@ class ScreenCapturer:
         try:
             import vision_framework
             self.vision_pipeline = vision_framework.VisionHostPipeline()
+            if isinstance(vision_algorithms, (list, tuple, set)):
+                self.vision_pipeline.set_enabled_plugins(vision_algorithms)
         except Exception as e:
             logging.error(f"VisionHostPipeline init failed: {e}")
             self.vision_pipeline = None
 
-        # The host predicts the same QImage state as the real viewer.
-        # Disable with DESKLITE_SHADOW_REPAIR=0 for performance comparisons.
+        self.vision_enabled = bool(vision_enabled)
+        self.shadow_repair_enabled = bool(shadow_repair)
         self.shadow_viewer = None
-        if os.environ.get("DESKLITE_SHADOW_REPAIR", "1") != "0":
+        if (self.vision_enabled and self.shadow_repair_enabled
+                and os.environ.get("DESKLITE_SHADOW_REPAIR", "1") != "0"):
             try:
                 from shadow_viewer import ShadowViewer
                 self.shadow_viewer = ShadowViewer()
@@ -211,6 +215,26 @@ class ScreenCapturer:
         self.last_grid = None  # Force next frame to be sent
         self.reset_vision_state()
 
+    def update_processing_settings(self, vision_enabled=True, vision_algorithms=None,
+                                   shadow_repair=True):
+        self.vision_enabled = bool(vision_enabled)
+        self.shadow_repair_enabled = bool(shadow_repair)
+        if (self.vision_pipeline is not None
+                and isinstance(vision_algorithms, (list, tuple, set))):
+            self.vision_pipeline.set_enabled_plugins(vision_algorithms)
+        if (self.vision_enabled and self.shadow_repair_enabled
+                and self.shadow_viewer is None):
+            try:
+                from shadow_viewer import ShadowViewer
+                self.shadow_viewer = ShadowViewer()
+            except Exception:
+                logging.exception("Could not enable shadow repair")
+                raise
+        elif not self.vision_enabled or not self.shadow_repair_enabled:
+            self.shadow_viewer = None
+        self.last_grid = None
+        self.reset_vision_state()
+
     def get_cursor_pos(self):
         """Returns cursor coordinates relative to monitor."""
         if sys.platform == "win32":
@@ -285,7 +309,7 @@ class ScreenCapturer:
 
                 # Only run the CPU uint32 grid diff check when using the GDI fallback path!
                 # When from_dxgi_update is True, the DXGI Desktop Duplication API already guaranteed a GPU change.
-                if not from_dxgi_update:
+                if self.vision_enabled and not from_dxgi_update:
                     fh, fw = img_np.shape[:2]
                     grid = img_np.view(np.uint32).reshape(fh, fw)[::4, ::4]
                     if not force and self.last_grid is not None and self.last_grid.shape == grid.shape:
@@ -299,6 +323,9 @@ class ScreenCapturer:
                     new_w = max(100, int(self.width * self.scale))
                     new_h = max(100, int(self.height * self.scale))
                     img_np = cv2.resize(img_np, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+                if not self.vision_enabled:
+                    return self._encode_jpeg(img_np, self.quality)
 
                 if self.vision_pipeline is not None:
                     packet = self.vision_pipeline.encode_frame(img_np, force, self._encode_jpeg, self.quality)
@@ -339,6 +366,3 @@ class ScreenCapturer:
             return buf.getvalue()
         except Exception:
             return None
-
-
-

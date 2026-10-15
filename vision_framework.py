@@ -1242,13 +1242,14 @@ class VisionHostPipeline:
     Maintains `self.prev_frame` in lockstep with the Viewer's reconstructed canvas.
     """
     def __init__(self):
-        self.plugins: list[BaseRecognizer] = [
+        self._all_plugins: list[BaseRecognizer] = [
             StateCacheRecognizer(),
             BackgroundRestoreRecognizer(),
             AnimationCycleRecognizer(),
             Scroll2DAndSliderRecognizer(),
             WindowMove2DRecognizer(),
         ]
+        self.plugins = list(self._all_plugins)
         self.prev_frame = None
         self._delta_frames_since_keyframe = 0
         self._keyframe_interval = 120  # Periodically discard lossy JPEG prediction drift.
@@ -1268,7 +1269,14 @@ class VisionHostPipeline:
         }
 
     def register_plugin(self, plugin: BaseRecognizer):
+        self._all_plugins.append(plugin)
         self.plugins.append(plugin)
+
+    def set_enabled_plugins(self, enabled_names):
+        enabled_names = set(enabled_names)
+        self.plugins = [plugin for plugin in self._all_plugins
+                        if plugin.name in enabled_names]
+        self.reset()
 
     def reset(self):
         self.prev_frame = None

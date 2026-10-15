@@ -9,12 +9,22 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QLineEdit, QComboBox, QFrame, QMessageBox
+    QLabel, QPushButton, QLineEdit, QComboBox, QFrame, QMessageBox,
+    QDialog, QCheckBox, QDialogButtonBox
 )
 
 import common
 from host_service import HostService
 from viewer_window import RemoteDesktopViewer
+
+
+VISION_ALGORITHMS = {
+    "StateCacheRecognizer": "State cache",
+    "BackgroundRestoreRecognizer": "Background restore",
+    "AnimationCycleRecognizer": "Animation cycle detection",
+    "Scroll2DAndSliderRecognizer": "Scroll / slider detection",
+    "WindowMove2DRecognizer": "Window movement detection",
+}
 
 
 def render_app_image(size=512):
@@ -185,7 +195,7 @@ class DeskLiteApp(QMainWindow):
         is_adm = common.is_admin()
         role_tag = "[SYSTEM]" if is_sys else ("[Administrator]" if is_adm and sys.platform == "win32" else "")
         self.setWindowTitle(f"DeskLite {role_tag} - Remote Desktop".replace("  ", " "))
-        self.setFixedSize(640, 410)
+        self.setFixedSize(640, 450)
 
         self.config = common.load_config()
         self.host_service = None
@@ -394,6 +404,9 @@ class DeskLiteApp(QMainWindow):
             self.combo_mode.setCurrentIndex(1)
         self.combo_mode.currentIndexChanged.connect(self.on_mode_change)
         server_row.addWidget(self.combo_mode)
+        btn_processing = QPushButton("⚙️ Processing…")
+        btn_processing.clicked.connect(self.open_processing_settings)
+        server_row.addWidget(btn_processing)
         root_layout.addLayout(server_row)
 
         # BOTTOM ROW 2: Platform / SYSTEM & UAC Controls
@@ -437,9 +450,71 @@ class DeskLiteApp(QMainWindow):
             quality=self.config.get("quality", 75),
             max_fps=self.config.get("max_fps", 30),
             scale=self.config.get("scale", 1.0),
+            vision_enabled=self.config.get("vision_enabled", True),
+            vision_algorithms=self.config.get("vision_algorithms", list(VISION_ALGORITHMS)),
+            shadow_repair=self.config.get("shadow_repair", True),
             status_callback=self.on_host_status
         )
         self.host_service.start()
+
+    def open_processing_settings(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Capture and image processing")
+        dialog.setMinimumWidth(400)
+        layout = QVBoxLayout(dialog)
+
+        raw_capture = QCheckBox("Raw capture + JPEG (disable Vision processing)")
+        raw_capture.setToolTip(
+            "Uses DXGI when available on Windows, otherwise the platform capture backend. "
+            "Sends full JPEG frames without dirty rectangles or recognizers."
+        )
+        raw_capture.setChecked(not self.config.get("vision_enabled", True))
+        layout.addWidget(raw_capture)
+
+        layout.addWidget(QLabel("Vision recognizers (used when raw mode is off):"))
+        enabled = set(self.config.get("vision_algorithms", list(VISION_ALGORITHMS)))
+        algorithm_boxes = {}
+        for name, label in VISION_ALGORITHMS.items():
+            checkbox = QCheckBox(label)
+            checkbox.setChecked(name in enabled)
+            algorithm_boxes[name] = checkbox
+            layout.addWidget(checkbox)
+
+        shadow_box = QCheckBox("Shadow viewer repair (pixel comparison and lossless correction)")
+        shadow_box.setChecked(self.config.get("shadow_repair", True))
+        layout.addWidget(shadow_box)
+
+        def update_enabled_state(checked):
+            for checkbox in algorithm_boxes.values():
+                checkbox.setEnabled(not checked)
+            shadow_box.setEnabled(not checked)
+
+        raw_capture.toggled.connect(update_enabled_state)
+        update_enabled_state(raw_capture.isChecked())
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self.config["vision_enabled"] = not raw_capture.isChecked()
+        self.config["vision_algorithms"] = [
+            name for name, checkbox in algorithm_boxes.items() if checkbox.isChecked()
+        ]
+        self.config["shadow_repair"] = shadow_box.isChecked()
+        common.save_config(self.config)
+
+        if self.host_service:
+            self.host_service.capturer.update_processing_settings(
+                vision_enabled=self.config["vision_enabled"],
+                vision_algorithms=self.config["vision_algorithms"],
+                shadow_repair=self.config["shadow_repair"],
+            )
 
     def on_host_status(self, status, detail=""):
         self.status_sig.emit(status, detail)
@@ -648,4 +723,3 @@ if __name__ == "__main__":
         window.setWindowIcon(app_icon)
         window.show()
         sys.exit(app.exec())
-
