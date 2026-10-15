@@ -18,6 +18,7 @@ class ShadowViewer:
     def __init__(self):
         self.decoder = VisionViewerDecoder()
         self.canvas = None
+        self._pixel_image = None
         self.residual_bytes = 0
         self.repaired_frames = 0
         self.full_frames = 0
@@ -25,6 +26,7 @@ class ShadowViewer:
     def reset(self):
         self.decoder = VisionViewerDecoder()
         self.canvas = None
+        self._pixel_image = None
 
     @staticmethod
     def _png(bgr):
@@ -40,11 +42,34 @@ class ShadowViewer:
         raw = np.frombuffer(img.bits(), np.uint8).reshape(h, img.bytesPerLine())
         return raw[:, :w * 3].reshape(h, w, 3)[:, :, ::-1].copy()
 
+    def _pixel_view(self):
+        self._pixel_image = self.canvas
+        img = self._pixel_image
+        h, w = img.height(), img.width()
+        raw = np.frombuffer(img.bits(), np.uint8).reshape(h, img.bytesPerLine())
+        return raw[:, :w * 4].reshape(h, w, 4)
+
+    @staticmethod
+    def _difference_mask(left, right):
+        if left.shape[:2] != right.shape[:2]:
+            return None
+        if left.size == 0:
+            return np.zeros(left.shape[:2], dtype=bool)
+        if left.shape[2] == 4 and right.shape[2] == 3:
+            left = left[:, :, :3]
+        elif left.shape[2] != right.shape[2]:
+            return None
+        diff = cv2.absdiff(left, right)
+        if diff.shape[2] >= 4:
+            return cv2.inRange(diff, (0, 0, 0, 0), (0, 0, 0, 255)) == 0
+        return cv2.inRange(diff, (0, 0, 0), (0, 0, 0)) == 0
+
     def _new_keyframe(self, target):
         # An uncompressed prediction source is mandatory at the start of an epoch:
         # JPEG keyframes would otherwise introduce errors before the first delta.
         data = self._png(target)
-        self.canvas = QImage.fromData(data)
+        self.canvas = QImage.fromData(data).convertToFormat(QImage.Format.Format_ARGB32)
+        self._pixel_image = None
         if self.canvas.isNull():
             raise ValueError("Could not decode keyframe")
         self.decoder.on_full_frame(len(data), self.canvas.width(),
@@ -61,6 +86,8 @@ class ShadowViewer:
         """
         if target.ndim != 3 or target.shape[2] < 3:
             return packet
+        target = np.ascontiguousarray(target[:, :, :4] if target.shape[2] >= 4
+                                      else target[:, :, :3])
         if packet is None:
             # The motion recognizer may declare a frame unchanged even though
             # visually significant pixels were omitted by a confidence threshold.
@@ -69,8 +96,11 @@ class ShadowViewer:
                 return self._new_keyframe(target)
             if self.canvas.width() != target.shape[1] or self.canvas.height() != target.shape[0]:
                 return self._new_keyframe(target)
-            if not np.any(self._pixels() != target[:, :, :3]):
+            pixels = self._pixel_view()
+            if not np.any(self._difference_mask(pixels, target)):
                 return None
+            del pixels
+            self._pixel_image = None
             packet = pack_vf_packet([])
         height, width = target.shape[:2]
 
@@ -80,9 +110,10 @@ class ShadowViewer:
             return self._new_keyframe(target)
 
         # Only decode actual protocol operations; this mirrors the Qt viewer.
+        self._pixel_image = None
         self.decoder.apply_vf_packet(packet, self.canvas)
-        reconstructed = self._pixels()
-        bad = np.any(reconstructed != target[:, :, :3], axis=2)
+        reconstructed = self._pixel_view()
+        bad = self._difference_mask(reconstructed, target)
         if not np.any(bad):
             return packet
 
@@ -100,9 +131,11 @@ class ShadowViewer:
             return self._new_keyframe(target)
 
         corrected = packet[:2] + bytes([original_count + 1]) + packet[3:] + cmd
+        del reconstructed
+        self._pixel_image = None
         self.decoder.apply_vf_packet(pack_vf_packet([cmd]), self.canvas)
         # Detect renderer-specific differences rather than assuming PNG draws correctly.
-        if np.any(self._pixels() != target[:, :, :3]):
+        if np.any(self._difference_mask(self._pixel_view(), target)):
             logging.warning("Shadow viewer could not reconstruct exact frame; sending keyframe")
             return self._new_keyframe(target)
         self.residual_bytes += len(correction)

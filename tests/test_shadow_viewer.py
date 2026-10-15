@@ -24,7 +24,7 @@ class ShadowViewerTests(unittest.TestCase):
 
     def test_initial_keyframe_is_lossless(self):
         packet = self.shadow.process(self.original, b"JPEG")
-        self.assertTrue(packet.startswith(b"\\x89PNG\\r\\n\\x1a\\n"))
+        self.assertTrue(packet.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assert_synced(self.original)
 
     def test_imperfect_motion_uses_lossless_residual(self):
@@ -50,14 +50,14 @@ class ShadowViewerTests(unittest.TestCase):
         self.assertTrue(ok)
         proposal = pack_vf_packet([pack_jpeg_patch(0, 0, 96, 64, jpg.tobytes())])
         repaired = self.shadow.process(target, proposal)
-        self.assertTrue(repaired.startswith(b"VF") or repaired.startswith(b"\\x89PNG"))
+        self.assertTrue(repaired.startswith(b"VF") or repaired.startswith(b"\x89PNG"))
         self.assert_synced(target)
 
     def test_restart_does_not_reuse_old_canvas(self):
         self.shadow.process(self.original, b"JPEG")
         self.shadow.reset()
         target = 255 - self.original
-        self.assertTrue(self.shadow.process(target, b"VF\\x00").startswith(b"\\x89PNG"))
+        self.assertTrue(self.shadow.process(target, b"VF\x00").startswith(b"\x89PNG"))
         self.assert_synced(target)
 
 
