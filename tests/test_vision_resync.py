@@ -1,7 +1,7 @@
 """Regression tests for frame dirtiness and JPEG prediction epoch resets."""
 import unittest
 import numpy as np
-from vision_framework import VisionHostPipeline, VisionViewerDecoder
+from vision_framework import VisionHostPipeline
 
 
 class VisionFrameResyncTests(unittest.TestCase):
