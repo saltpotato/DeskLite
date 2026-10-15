@@ -60,6 +60,16 @@ class ScreenCapturer:
             logging.error(f"VisionHostPipeline init failed: {e}")
             self.vision_pipeline = None
 
+        # The host predicts the same QImage state as the real viewer.
+        # Disable with DESKLITE_SHADOW_REPAIR=0 for performance comparisons.
+        self.shadow_viewer = None
+        if os.environ.get("DESKLITE_SHADOW_REPAIR", "1") != "0":
+            try:
+                from shadow_viewer import ShadowViewer
+                self.shadow_viewer = ShadowViewer()
+            except Exception:
+                logging.exception("Shadow viewer unavailable; using legacy encoder")
+
         self._update_monitor()
 
     def reload_vision_pipeline(self) -> bool:
@@ -68,6 +78,8 @@ class ScreenCapturer:
             import vision_framework
             importlib.reload(vision_framework)
             self.vision_pipeline = vision_framework.VisionHostPipeline()
+            if self.shadow_viewer is not None:
+                self.shadow_viewer.reset()
             self.last_grid = None
             if os.path.exists(self.vision_path):
                 self.last_vision_mtime = os.path.getmtime(self.vision_path)
@@ -119,6 +131,8 @@ class ScreenCapturer:
     def reset_vision_state(self):
         if self.vision_pipeline is not None:
             self.vision_pipeline.reset()
+        if self.shadow_viewer is not None:
+            self.shadow_viewer.reset()
 
     def notify_input(self, evt):
         if evt.get("event") in ("reload_vision", "hot_reload"):
@@ -287,7 +301,17 @@ class ScreenCapturer:
                     img_np = cv2.resize(img_np, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
                 if self.vision_pipeline is not None:
-                    return self.vision_pipeline.encode_frame(img_np, force, self._encode_jpeg, self.quality)
+                    packet = self.vision_pipeline.encode_frame(img_np, force, self._encode_jpeg, self.quality)
+                    if self.shadow_viewer is not None:
+                        try:
+                            return self.shadow_viewer.process(img_np, packet)
+                        except Exception:
+                            # Never emit an unvalidated delta after a shadow failure.
+                            logging.exception("Shadow repair failed; resetting encoder")
+                            self.vision_pipeline.reset()
+                            self.shadow_viewer.reset()
+                            return self.shadow_viewer._new_keyframe(img_np)
+                    return packet
 
                 return self._encode_jpeg(img_np, self.quality)
             except Exception:
