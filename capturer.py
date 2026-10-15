@@ -304,7 +304,14 @@ class ScreenCapturer:
                     packet = self.vision_pipeline.encode_frame(img_np, force, self._encode_jpeg, self.quality)
                     if self.shadow_viewer is not None:
                         try:
-                            return self.shadow_viewer.process(img_np, packet)
+                            output = self.shadow_viewer.process(img_np, packet)
+                            # The shadow may replace a costly delta with a full
+                            # lossless keyframe. Client caches were cleared then,
+                            # so the host's prediction/cache epoch must also end.
+                            if (output is not None and output.startswith(b"\\x89PNG")
+                                    and packet is not None and packet.startswith(b"VF")):
+                                self.vision_pipeline.reset()
+                            return output
                         except Exception:
                             # Never emit an unvalidated delta after a shadow failure.
                             logging.exception("Shadow repair failed; resetting encoder")
