@@ -35,6 +35,21 @@ class CaptureModeTests(unittest.TestCase):
         pipeline.set_enabled_plugins([])
         self.assertEqual(pipeline.plugins, [])
 
+    def test_shadow_repair_is_automatic_when_vision_is_enabled(self):
+        capturer = ScreenCapturer.__new__(ScreenCapturer)
+        capturer.vision_enabled = False
+        capturer.vision_algorithms = None
+        capturer.vision_pipeline = None
+        capturer.shadow_viewer = None
+        capturer.last_grid = None
+        capturer.reset_vision_state = lambda: None
+
+        capturer.update_processing_settings(vision_enabled=True)
+        self.assertIsNotNone(capturer.shadow_viewer)
+
+        capturer.update_processing_settings(vision_enabled=False)
+        self.assertIsNone(capturer.shadow_viewer)
+
 
 if __name__ == "__main__":
     unittest.main()

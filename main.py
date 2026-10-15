@@ -452,7 +452,6 @@ class DeskLiteApp(QMainWindow):
             scale=self.config.get("scale", 1.0),
             vision_enabled=self.config.get("vision_enabled", True),
             vision_algorithms=self.config.get("vision_algorithms", list(VISION_ALGORITHMS)),
-            shadow_repair=self.config.get("shadow_repair", True),
             status_callback=self.on_host_status
         )
         self.host_service.start()
@@ -480,14 +479,14 @@ class DeskLiteApp(QMainWindow):
             algorithm_boxes[name] = checkbox
             layout.addWidget(checkbox)
 
-        shadow_box = QCheckBox("Shadow viewer repair (pixel comparison and lossless correction)")
-        shadow_box.setChecked(self.config.get("shadow_repair", True))
-        layout.addWidget(shadow_box)
+        shadow_status = QLabel(
+            "Shadow repair is always active in Vision mode; it is not used in raw mode."
+        )
+        layout.addWidget(shadow_status)
 
         def update_enabled_state(checked):
             for checkbox in algorithm_boxes.values():
                 checkbox.setEnabled(not checked)
-            shadow_box.setEnabled(not checked)
 
         raw_capture.toggled.connect(update_enabled_state)
         update_enabled_state(raw_capture.isChecked())
@@ -506,14 +505,12 @@ class DeskLiteApp(QMainWindow):
         self.config["vision_algorithms"] = [
             name for name, checkbox in algorithm_boxes.items() if checkbox.isChecked()
         ]
-        self.config["shadow_repair"] = shadow_box.isChecked()
         common.save_config(self.config)
 
         if self.host_service:
             self.host_service.capturer.update_processing_settings(
                 vision_enabled=self.config["vision_enabled"],
                 vision_algorithms=self.config["vision_algorithms"],
-                shadow_repair=self.config["shadow_repair"],
             )
 
     def on_host_status(self, status, detail=""):

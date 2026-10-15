@@ -25,7 +25,7 @@ from PIL import Image
 
 class ScreenCapturer:
     def __init__(self, monitor_index=1, quality=75, scale=1.0,
-                 vision_enabled=True, vision_algorithms=None, shadow_repair=True):
+                 vision_enabled=True, vision_algorithms=None):
         ensure_desktop_access()
         self.quality = quality
         self.scale = scale
@@ -54,25 +54,23 @@ class ScreenCapturer:
         self.last_vision_mtime = os.path.getmtime(self.vision_path) if os.path.exists(self.vision_path) else 0.0
         self.last_reload_check = 0.0
 
+        self.vision_enabled = bool(vision_enabled)
+        self.vision_algorithms = (tuple(vision_algorithms)
+                                  if isinstance(vision_algorithms, (list, tuple, set))
+                                  else None)
+
         try:
             import vision_framework
             self.vision_pipeline = vision_framework.VisionHostPipeline()
-            if isinstance(vision_algorithms, (list, tuple, set)):
-                self.vision_pipeline.set_enabled_plugins(vision_algorithms)
+            if self.vision_algorithms is not None:
+                self.vision_pipeline.set_enabled_plugins(self.vision_algorithms)
         except Exception as e:
             logging.error(f"VisionHostPipeline init failed: {e}")
             self.vision_pipeline = None
 
-        self.vision_enabled = bool(vision_enabled)
-        self.shadow_repair_enabled = bool(shadow_repair)
         self.shadow_viewer = None
-        if (self.vision_enabled and self.shadow_repair_enabled
-                and os.environ.get("DESKLITE_SHADOW_REPAIR", "1") != "0"):
-            try:
-                from shadow_viewer import ShadowViewer
-                self.shadow_viewer = ShadowViewer()
-            except Exception:
-                logging.exception("Shadow viewer unavailable; using legacy encoder")
+        if self.vision_enabled:
+            self._create_shadow_viewer()
 
         self._update_monitor()
 
@@ -82,6 +80,8 @@ class ScreenCapturer:
             import vision_framework
             importlib.reload(vision_framework)
             self.vision_pipeline = vision_framework.VisionHostPipeline()
+            if self.vision_algorithms is not None:
+                self.vision_pipeline.set_enabled_plugins(self.vision_algorithms)
             if self.shadow_viewer is not None:
                 self.shadow_viewer.reset()
             self.last_grid = None
@@ -215,22 +215,21 @@ class ScreenCapturer:
         self.last_grid = None  # Force next frame to be sent
         self.reset_vision_state()
 
-    def update_processing_settings(self, vision_enabled=True, vision_algorithms=None,
-                                   shadow_repair=True):
+    def _create_shadow_viewer(self):
+        from shadow_viewer import ShadowViewer
+        self.shadow_viewer = ShadowViewer()
+
+    def update_processing_settings(self, vision_enabled=True, vision_algorithms=None):
         self.vision_enabled = bool(vision_enabled)
-        self.shadow_repair_enabled = bool(shadow_repair)
         if (self.vision_pipeline is not None
                 and isinstance(vision_algorithms, (list, tuple, set))):
-            self.vision_pipeline.set_enabled_plugins(vision_algorithms)
-        if (self.vision_enabled and self.shadow_repair_enabled
-                and self.shadow_viewer is None):
-            try:
-                from shadow_viewer import ShadowViewer
-                self.shadow_viewer = ShadowViewer()
-            except Exception:
-                logging.exception("Could not enable shadow repair")
-                raise
-        elif not self.vision_enabled or not self.shadow_repair_enabled:
+            self.vision_algorithms = tuple(vision_algorithms)
+            self.vision_pipeline.set_enabled_plugins(self.vision_algorithms)
+        elif vision_algorithms is None:
+            self.vision_algorithms = None
+        if self.vision_enabled and self.shadow_viewer is None:
+            self._create_shadow_viewer()
+        elif not self.vision_enabled:
             self.shadow_viewer = None
         self.last_grid = None
         self.reset_vision_state()
