@@ -25,11 +25,14 @@ from PIL import Image
 
 class ScreenCapturer:
     def __init__(self, monitor_index=1, quality=75, scale=1.0,
-                 vision_enabled=True, vision_algorithms=None):
+                 vision_enabled=True, vision_algorithms=None, shadow_repair=True,
+                 source_mode="desktop", virtual_scene=None):
         ensure_desktop_access()
         self.quality = quality
         self.scale = scale
         self.monitor_index = monitor_index
+        self.virtual_scene = virtual_scene
+        self.source_mode = "virtual" if (source_mode == "virtual" and virtual_scene is not None) else "desktop"
 
         self.width = 1920
         self.height = 1080
@@ -54,25 +57,36 @@ class ScreenCapturer:
         self.last_vision_mtime = os.path.getmtime(self.vision_path) if os.path.exists(self.vision_path) else 0.0
         self.last_reload_check = 0.0
 
-        self.vision_enabled = bool(vision_enabled)
-        self.vision_algorithms = (tuple(vision_algorithms)
-                                  if isinstance(vision_algorithms, (list, tuple, set))
-                                  else None)
-
         try:
             import vision_framework
             self.vision_pipeline = vision_framework.VisionHostPipeline()
-            if self.vision_algorithms is not None:
-                self.vision_pipeline.set_enabled_plugins(self.vision_algorithms)
+            if isinstance(vision_algorithms, (list, tuple, set)):
+                self.vision_pipeline.set_enabled_plugins(vision_algorithms)
         except Exception as e:
             logging.error(f"VisionHostPipeline init failed: {e}")
             self.vision_pipeline = None
 
+        self.vision_enabled = bool(vision_enabled)
+        self.shadow_repair_enabled = bool(shadow_repair)
         self.shadow_viewer = None
-        if self.vision_enabled:
-            self._create_shadow_viewer()
+        if (self.vision_enabled and self.shadow_repair_enabled
+                and os.environ.get("DESKLITE_SHADOW_REPAIR", "1") != "0"):
+            try:
+                from shadow_viewer import ShadowViewer
+                self.shadow_viewer = ShadowViewer(smart_mode=True)
+            except Exception:
+                logging.exception("Shadow viewer unavailable; using legacy encoder")
 
-        self._update_monitor()
+        if self.vision_pipeline is not None:
+            self.vision_pipeline.shared["shadow_repair_active"] = (self.shadow_viewer is not None)
+
+        if self.source_mode == "virtual" and self.virtual_scene is not None:
+            self.width = self.virtual_scene.width
+            self.height = self.virtual_scene.height
+            self.left = 0
+            self.top = 0
+        else:
+            self._update_monitor()
 
     def reload_vision_pipeline(self) -> bool:
         """Dynamically reloads `vision_framework.py` and `input_controller.py` in-memory without restarting the main process."""
@@ -80,8 +94,7 @@ class ScreenCapturer:
             import vision_framework
             importlib.reload(vision_framework)
             self.vision_pipeline = vision_framework.VisionHostPipeline()
-            if self.vision_algorithms is not None:
-                self.vision_pipeline.set_enabled_plugins(self.vision_algorithms)
+            self.vision_pipeline.shared["shadow_repair_active"] = (self.shadow_viewer is not None)
             if self.shadow_viewer is not None:
                 self.shadow_viewer.reset()
             self.last_grid = None
@@ -215,22 +228,42 @@ class ScreenCapturer:
         self.last_grid = None  # Force next frame to be sent
         self.reset_vision_state()
 
-    def _create_shadow_viewer(self):
-        from shadow_viewer import ShadowViewer
-        self.shadow_viewer = ShadowViewer()
-
-    def update_processing_settings(self, vision_enabled=True, vision_algorithms=None):
+    def update_processing_settings(self, vision_enabled=True, vision_algorithms=None,
+                                   shadow_repair=True):
         self.vision_enabled = bool(vision_enabled)
+        self.shadow_repair_enabled = bool(shadow_repair)
         if (self.vision_pipeline is not None
                 and isinstance(vision_algorithms, (list, tuple, set))):
-            self.vision_algorithms = tuple(vision_algorithms)
-            self.vision_pipeline.set_enabled_plugins(self.vision_algorithms)
-        elif vision_algorithms is None:
-            self.vision_algorithms = None
-        if self.vision_enabled and self.shadow_viewer is None:
-            self._create_shadow_viewer()
-        elif not self.vision_enabled:
+            self.vision_pipeline.set_enabled_plugins(vision_algorithms)
+        if (self.vision_enabled and self.shadow_repair_enabled
+                and self.shadow_viewer is None):
+            try:
+                from shadow_viewer import ShadowViewer
+                self.shadow_viewer = ShadowViewer(smart_mode=True)
+            except Exception:
+                logging.exception("Could not enable shadow repair")
+                raise
+        elif not self.vision_enabled or not self.shadow_repair_enabled:
             self.shadow_viewer = None
+        if self.vision_pipeline is not None:
+            self.vision_pipeline.shared["shadow_repair_active"] = (self.shadow_viewer is not None)
+        self.last_grid = None
+        self.reset_vision_state()
+
+    def set_source_mode(self, mode: str, virtual_scene=None):
+        """Switch between real desktop capture ('desktop') and synthetic sandbox ('virtual')."""
+        if virtual_scene is not None:
+            self.virtual_scene = virtual_scene
+        self.source_mode = "virtual" if (mode == "virtual" and self.virtual_scene is not None) else "desktop"
+        if self.source_mode == "virtual" and self.virtual_scene is not None:
+            self.width = self.virtual_scene.width
+            self.height = self.virtual_scene.height
+            self.left = 0
+            self.top = 0
+            if hasattr(self.virtual_scene, "mark_dirty"):
+                self.virtual_scene.mark_dirty()
+        else:
+            self._update_monitor()
         self.last_grid = None
         self.reset_vision_state()
 
@@ -249,7 +282,13 @@ class ScreenCapturer:
 
     def _grab_frame_array(self, force=False, now=0.0):
         """Grabs a live (H, W, 4) BGRA frame using DXGI Desktop Duplication API (dxcam)
-        with automatic GDI (mss) fallback for UAC prompts and forced post-click updates."""
+        with automatic GDI (mss) fallback, or renders the virtual sandbox when active."""
+        if self.source_mode == "virtual" and self.virtual_scene is not None:
+            arr = self.virtual_scene.render_frame(force=force)
+            if arr is None:
+                return None, False
+            return arr, True
+
         if ensure_desktop_access(before_switch_callback=self._release_capture_resources):
             self.sct = mss.MSS()
             self._update_monitor()
@@ -298,7 +337,13 @@ class ScreenCapturer:
         """Captures a live frame via DXGI GPU Duplication (with GDI fallback) and encodes via VisionHostPipeline."""
         now = time.time()
         self.check_hot_reload(now)
-        grabbed, from_dxgi_update = self._grab_frame_array(force=force, now=now)
+        force_keyframe = bool(force)
+        settle_grab = (
+            not force_keyframe
+            and self.shadow_viewer is not None
+            and self.shadow_viewer.needs_settle(now)
+        )
+        grabbed, from_dxgi_update = self._grab_frame_array(force=(force_keyframe or settle_grab), now=now)
         if grabbed is None:
             return None
 
@@ -311,7 +356,7 @@ class ScreenCapturer:
                 if self.vision_enabled and not from_dxgi_update:
                     fh, fw = img_np.shape[:2]
                     grid = img_np.view(np.uint32).reshape(fh, fw)[::4, ::4]
-                    if not force and self.last_grid is not None and self.last_grid.shape == grid.shape:
+                    if not force_keyframe and not settle_grab and self.last_grid is not None and self.last_grid.shape == grid.shape:
                         if not np.any(grid != self.last_grid) and (now - self.last_send_time < 1.5):
                             return None
                     self.last_grid = grid.copy()
@@ -327,14 +372,14 @@ class ScreenCapturer:
                     return self._encode_jpeg(img_np, self.quality)
 
                 if self.vision_pipeline is not None:
-                    packet = self.vision_pipeline.encode_frame(img_np, force, self._encode_jpeg, self.quality)
+                    packet = self.vision_pipeline.encode_frame(img_np, force_keyframe, self._encode_jpeg, self.quality)
                     if self.shadow_viewer is not None:
                         try:
                             output = self.shadow_viewer.process(img_np, packet)
                             # The shadow may replace a costly delta with a full
                             # lossless keyframe. Client caches were cleared then,
                             # so the host's prediction/cache epoch must also end.
-                            if (output is not None and output.startswith(b"\\x89PNG")
+                            if (output is not None and output.startswith(b"\x89PNG")
                                     and packet is not None and packet.startswith(b"VF")):
                                 self.vision_pipeline.reset()
                             return output

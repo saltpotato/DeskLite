@@ -246,7 +246,7 @@
     let isConnected = false;
     let shouldReconnect = false;
     let canvas = document.getElementById("screenCanvas");
-    let ctx = canvas.getContext("2d");
+    let ctx = canvas.getContext("2d", { alpha: false });
     ctx.imageSmoothingEnabled = false;
     let debugCanvas = document.getElementById("debugCanvas");
     let debugCtx = debugCanvas.getContext("2d");
@@ -555,15 +555,11 @@
     function recordDebugRect(x, y, w, h, kind, label) {
       if (!visionDebugMode || w <= 0 || h <= 0) return;
       const now = performance.now();
-      debugRects = debugRects.filter(r => (now - r.ts) <= 950);
+      while (debugRects.length > 0 && (now - debugRects[0].ts) > 950) {
+        debugRects.shift();
+      }
       debugRects.push({ x, y, w, h, kind, label, ts: now });
       if (debugRects.length > 36) debugRects.shift();
-      if (kind !== "jpeg" || (w * h >= 120 * 80)) {
-        console.info(
-          `[VF-DEBUG][WEB] ${kind.toUpperCase()} rect=(${x},${y},${w}x${h}) ${label} || ` +
-          `stats: hits=${debugStats.cache} scroll=${debugStats.scroll} jpeg=${debugStats.jpeg}`
-        );
-      }
     }
 
     function renderDebugOverlay() {
@@ -705,24 +701,56 @@
       }
 
       const vfStateCache = new Map();
+      function clearVfStateCache() {
+        for (const v of vfStateCache.values()) {
+          if (v && typeof v.close === "function") v.close();
+        }
+        vfStateCache.clear();
+      }
       const vfScratchCanvas = document.createElement("canvas");
-      const vfScratchCtx = vfScratchCanvas.getContext("2d");
+      const vfScratchCtx = vfScratchCanvas.getContext("2d", { alpha: false });
       vfScratchCtx.imageSmoothingEnabled = false;
       const vfBgCanvas = document.createElement("canvas");
-      const vfBgCtx = vfBgCanvas.getContext("2d");
+      const vfBgCtx = vfBgCanvas.getContext("2d", { alpha: false });
       vfBgCtx.imageSmoothingEnabled = false;
+      let awaitingKeyframe = false;
+
+      function scheduleFrameQueueDrain() {
+        if (isRendering) return;
+        isRendering = true;
+        if (document.hidden) {
+          setTimeout(processFrameQueue, 0);
+        } else {
+          requestAnimationFrame(processFrameQueue);
+        }
+      }
+
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden && awaitingKeyframe) {
+          sendMsg(JSON.stringify({ type: "input", data: { event: "request_keyframe" } }));
+        }
+      });
 
       function enqueueCompleteFrame(buf) {
         const u8 = new Uint8Array(buf, 0, 2);
         const isDelta = (u8[0] === 0x44 && u8[1] === 0x4C) || (u8[0] === 0x56 && u8[1] === 0x46);
-        if (!isDelta) {
+        if (awaitingKeyframe) {
+          if (isDelta) return;
+          frameQueue.length = 0;
+          awaitingKeyframe = false;
+        } else if (!isDelta) {
           frameQueue.length = 0;
         }
-        frameQueue.push(buf);
-        if (!isRendering) {
-          isRendering = true;
-          requestAnimationFrame(processFrameQueue);
+        if (isDelta && frameQueue.length >= 120) {
+          frameQueue.length = 0;
+          awaitingKeyframe = true;
+          if (!document.hidden) {
+            sendMsg(JSON.stringify({ type: "input", data: { event: "request_keyframe" } }));
+          }
+          return;
         }
+        frameQueue.push(buf);
+        scheduleFrameQueueDrain();
       }
 
       async function decodeVfPacket(buf) {
@@ -730,48 +758,30 @@
         const view = new DataView(buf);
         const count = view.getUint8(2);
         let offset = 3;
+
+        // Pass 1: Parse all commands synchronously and launch all patch image decodes in parallel
+        const ops = [];
+        const decodeJobs = [];
+        const decodeOpts = { imageOrientation: "none", premultiplyAlpha: "none", colorSpaceConversion: "none" };
         for (let i = 0; i < count && offset < buf.byteLength; i++) {
           const cmd = view.getUint8(offset);
           if (cmd === 0x01 && offset + 17 <= buf.byteLength) {
-            // CMD_SAVE_STATE (Only cache compact UI components <= 800x600, never giant viewports)
             const sid = view.getBigUint64(offset + 1, false).toString();
             const sx = view.getUint16(offset + 9, false);
             const sy = view.getUint16(offset + 11, false);
             const sw = view.getUint16(offset + 13, false);
             const sh = view.getUint16(offset + 15, false);
             offset += 17;
-            if (sw > 0 && sh > 0 && sw <= 800 && sh <= 600) {
-              const c = document.createElement("canvas");
-              c.width = sw;
-              c.height = sh;
-              const cCtx = c.getContext("2d");
-              cCtx.imageSmoothingEnabled = false;
-              cCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
-              vfStateCache.delete(sid);
-              vfStateCache.set(sid, c);
-              while (vfStateCache.size > 256) {
-                const firstKey = vfStateCache.keys().next().value;
-                vfStateCache.delete(firstKey);
-              }
-            }
+            ops.push({ cmd, sid, sx, sy, sw, sh });
           } else if (cmd === 0x02 && offset + 17 <= buf.byteLength) {
-            // CMD_RESTORE_STATE
             const sid = view.getBigUint64(offset + 1, false).toString();
             const dx = view.getUint16(offset + 9, false);
             const dy = view.getUint16(offset + 11, false);
             const dw = view.getUint16(offset + 13, false);
             const dh = view.getUint16(offset + 15, false);
             offset += 17;
-            const cached = vfStateCache.get(sid);
-            if (cached) {
-              vfStateCache.delete(sid);
-              vfStateCache.set(sid, cached);
-              ctx.drawImage(cached, dx, dy, dw, dh);
-              debugStats.cache++;
-              recordDebugRect(dx, dy, dw, dh, "cache", "RAM CACHE (0 KB)");
-            }
+            ops.push({ cmd, sid, dx, dy, dw, dh });
           } else if (cmd === 0x03 && offset + 17 <= buf.byteLength) {
-            // CMD_TRANSFORM_RECT (2D scroll / pan / zoom)
             const sx = view.getUint16(offset + 1, false);
             const sy = view.getUint16(offset + 3, false);
             const sw = view.getUint16(offset + 5, false);
@@ -781,29 +791,12 @@
             const dw = view.getUint16(offset + 13, false);
             const dh = view.getUint16(offset + 15, false);
             offset += 17;
-            if (sw > 0 && sh > 0 && dw > 0 && dh > 0) {
-              if (vfScratchCanvas.width < sw || vfScratchCanvas.height < sh) {
-                vfScratchCanvas.width = Math.max(vfScratchCanvas.width, sw);
-                vfScratchCanvas.height = Math.max(vfScratchCanvas.height, sh);
-                vfScratchCtx.imageSmoothingEnabled = false;
-              }
-              vfScratchCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
-              ctx.drawImage(vfScratchCanvas, 0, 0, sw, sh, dx, dy, dw, dh);
-              debugStats.scroll++;
-              const shiftY = sy - dy;
-              const shiftX = sx - dx;
-              const moveLbl = (shiftX && shiftY)
-                ? `GPU MOVE (dx:${-shiftX > 0 ? "+" : ""}${-shiftX},dy:${-shiftY > 0 ? "+" : ""}${-shiftY}px, 0 KB)`
-                : `GPU SCROLL (d${shiftY ? "y" : "x"}:${(shiftY || shiftX) > 0 ? "+" : ""}${shiftY || shiftX}px, 0 KB)`;
-              recordDebugRect(dx, dy, dw, dh, "scroll", moveLbl);
-            }
+            ops.push({ cmd, sx, sy, sw, sh, dx, dy, dw, dh });
           } else if (cmd === 0x04 && offset + 10 <= buf.byteLength) {
-            // CMD_MARK_DIRTY
             const sid = view.getBigUint64(offset + 1, false).toString();
             offset += 10;
-            vfStateCache.delete(sid);
+            ops.push({ cmd, sid });
           } else if (cmd === 0x05 && offset + 13 <= buf.byteLength) {
-            // CMD_JPEG_PATCH
             const dx = view.getUint16(offset + 1, false);
             const dy = view.getUint16(offset + 3, false);
             const dw = view.getUint16(offset + 5, false);
@@ -817,62 +810,142 @@
                 ? "image/png" : "image/jpeg";
               const blob = new Blob([bytes], { type: mime });
               offset += jlen;
-              try {
-                const bmp = await createImageBitmap(blob, { imageOrientation: "none", premultiplyAlpha: "none", colorSpaceConversion: "none" });
-                ctx.drawImage(bmp, dx, dy, dw, dh);
-                bmp.close();
-                debugStats.jpeg++;
-                recordDebugRect(dx, dy, dw, dh, "jpeg", `NET JPEG (${(jlen / 1024).toFixed(1)} KB)`);
-              } catch (e) {}
+              const op = { cmd, dx, dy, dw, dh, jlen, bmp: null };
+              ops.push(op);
+              decodeJobs.push(
+                createImageBitmap(blob, decodeOpts).then(b => { op.bmp = b; }).catch(() => {})
+              );
             } else {
               break;
             }
           } else if (cmd === 0x06 && offset + 5 <= buf.byteLength) {
-            // CMD_OVERLAY_META
             const mlen = view.getUint32(offset + 1, false);
-            if (offset + 5 + mlen <= buf.byteLength && visionDebugMode && debugRects.length > 0) {
+            const metaSlice = (offset + 5 + mlen <= buf.byteLength && visionDebugMode)
+              ? new Uint8Array(buf, offset + 5, mlen) : null;
+            offset += 5 + mlen;
+            if (metaSlice) ops.push({ cmd, metaSlice });
+          } else if ((cmd === 0x07 || cmd === 0x08) && offset + 9 <= buf.byteLength) {
+            const x = view.getUint16(offset + 1, false);
+            const y = view.getUint16(offset + 3, false);
+            const w = view.getUint16(offset + 5, false);
+            const h = view.getUint16(offset + 7, false);
+            offset += 9;
+            ops.push({ cmd, x, y, w, h });
+          } else if (cmd === 0x09 && offset + 25 <= buf.byteLength) {
+            const sid = view.getBigUint64(offset + 1, false).toString();
+            const sx = view.getUint16(offset + 9, false);
+            const sy = view.getUint16(offset + 11, false);
+            const sw = view.getUint16(offset + 13, false);
+            const sh = view.getUint16(offset + 15, false);
+            const dx = view.getUint16(offset + 17, false);
+            const dy = view.getUint16(offset + 19, false);
+            const dw = view.getUint16(offset + 21, false);
+            const dh = view.getUint16(offset + 23, false);
+            offset += 25;
+            ops.push({ cmd, sid, sx, sy, sw, sh, dx, dy, dw, dh });
+          } else {
+            break;
+          }
+        }
+
+        if (decodeJobs.length > 0) {
+          await Promise.all(decodeJobs);
+        }
+
+        // Pass 2: Execute all GPU canvas draws in exact command order
+        for (const op of ops) {
+          if (op.cmd === 0x01) {
+            if (op.sw > 0 && op.sh > 0 && op.sw <= 800 && op.sh <= 600) {
               try {
-                const txt = new TextDecoder().decode(new Uint8Array(buf, offset + 5, mlen));
+                const snap = await createImageBitmap(canvas, op.sx, op.sy, op.sw, op.sh);
+                const prev = vfStateCache.get(op.sid);
+                if (prev && typeof prev.close === "function") prev.close();
+                vfStateCache.delete(op.sid);
+                vfStateCache.set(op.sid, snap);
+                while (vfStateCache.size > 440) {
+                  const firstKey = vfStateCache.keys().next().value;
+                  const old = vfStateCache.get(firstKey);
+                  if (old && typeof old.close === "function") old.close();
+                  vfStateCache.delete(firstKey);
+                }
+              } catch (e) {}
+            }
+          } else if (op.cmd === 0x02) {
+            const cached = vfStateCache.get(op.sid);
+            if (cached) {
+              vfStateCache.delete(op.sid);
+              vfStateCache.set(op.sid, cached);
+              ctx.drawImage(cached, op.dx, op.dy, op.dw, op.dh);
+              debugStats.cache++;
+              recordDebugRect(op.dx, op.dy, op.dw, op.dh, "cache", "RAM CACHE (0 KB)");
+            }
+          } else if (op.cmd === 0x03) {
+            if (op.sw > 0 && op.sh > 0 && op.dw > 0 && op.dh > 0) {
+              if (vfScratchCanvas.width < op.sw || vfScratchCanvas.height < op.sh) {
+                vfScratchCanvas.width = Math.max(vfScratchCanvas.width, op.sw);
+                vfScratchCanvas.height = Math.max(vfScratchCanvas.height, op.sh);
+                vfScratchCtx.imageSmoothingEnabled = false;
+              }
+              vfScratchCtx.drawImage(canvas, op.sx, op.sy, op.sw, op.sh, 0, 0, op.sw, op.sh);
+              ctx.drawImage(vfScratchCanvas, 0, 0, op.sw, op.sh, op.dx, op.dy, op.dw, op.dh);
+              debugStats.scroll++;
+              const shiftY = op.sy - op.dy;
+              const shiftX = op.sx - op.dx;
+              const moveLbl = (shiftX && shiftY)
+                ? `GPU MOVE (dx:${-shiftX > 0 ? "+" : ""}${-shiftX},dy:${-shiftY > 0 ? "+" : ""}${-shiftY}px, 0 KB)`
+                : `GPU SCROLL (d${shiftY ? "y" : "x"}:${(shiftY || shiftX) > 0 ? "+" : ""}${shiftY || shiftX}px, 0 KB)`;
+              recordDebugRect(op.dx, op.dy, op.dw, op.dh, "scroll", moveLbl);
+            }
+          } else if (op.cmd === 0x04) {
+            const old = vfStateCache.get(op.sid);
+            if (old && typeof old.close === "function") old.close();
+            vfStateCache.delete(op.sid);
+          } else if (op.cmd === 0x05) {
+            if (op.bmp) {
+              ctx.drawImage(op.bmp, op.dx, op.dy, op.dw, op.dh);
+              op.bmp.close();
+              debugStats.jpeg++;
+              recordDebugRect(op.dx, op.dy, op.dw, op.dh, "jpeg", `NET JPEG (${(op.jlen / 1024).toFixed(1)} KB)`);
+            }
+          } else if (op.cmd === 0x06) {
+            if (debugRects.length > 0) {
+              try {
+                const txt = new TextDecoder().decode(op.metaSlice);
                 if (txt.includes('"anim_cycle"')) {
                   const last = debugRects[debugRects.length - 1];
                   last.kind = "anim";
                   last.label = "ANIM LOOP (0 KB)";
                   if (debugStats.cache > 0) debugStats.cache--;
                   debugStats.anim++;
-                  renderDebugOverlay();
                 }
               } catch (e) {}
             }
-            offset += 5 + mlen;
-          } else if (cmd === 0x07 && offset + 9 <= buf.byteLength) {
-            // CMD_UPDATE_BG
-            const sx = view.getUint16(offset + 1, false);
-            const sy = view.getUint16(offset + 3, false);
-            const sw = view.getUint16(offset + 5, false);
-            const sh = view.getUint16(offset + 7, false);
-            offset += 9;
-            if (sw > 0 && sh > 0) {
+          } else if (op.cmd === 0x07) {
+            if (op.w > 0 && op.h > 0) {
               if (vfBgCanvas.width !== canvas.width || vfBgCanvas.height !== canvas.height) {
                 vfBgCanvas.width = canvas.width;
                 vfBgCanvas.height = canvas.height;
                 vfBgCtx.drawImage(canvas, 0, 0);
               }
-              vfBgCtx.drawImage(canvas, sx, sy, sw, sh, sx, sy, sw, sh);
+              vfBgCtx.drawImage(canvas, op.x, op.y, op.w, op.h, op.x, op.y, op.w, op.h);
             }
-          } else if (cmd === 0x08 && offset + 9 <= buf.byteLength) {
-            // CMD_RESTORE_BG
-            const dx = view.getUint16(offset + 1, false);
-            const dy = view.getUint16(offset + 3, false);
-            const dw = view.getUint16(offset + 5, false);
-            const dh = view.getUint16(offset + 7, false);
-            offset += 9;
-            if (dw > 0 && dh > 0 && vfBgCanvas.width > 0 && vfBgCanvas.height > 0) {
-              ctx.drawImage(vfBgCanvas, dx, dy, dw, dh, dx, dy, dw, dh);
+          } else if (op.cmd === 0x08) {
+            if (op.w > 0 && op.h > 0 && vfBgCanvas.width > 0 && vfBgCanvas.height > 0) {
+              ctx.drawImage(vfBgCanvas, op.x, op.y, op.w, op.h, op.x, op.y, op.w, op.h);
               debugStats.bg++;
-              recordDebugRect(dx, dy, dw, dh, "bg", "BG RESTORE (0 KB)");
+              recordDebugRect(op.x, op.y, op.w, op.h, "bg", "BG RESTORE (0 KB)");
             }
-          } else {
-            break;
+          } else if (op.cmd === 0x09) {
+            const bmp = vfStateCache.get(op.sid);
+            if (bmp) {
+              ctx.drawImage(bmp, op.sx, op.sy, op.sw, op.sh, op.dx, op.dy, op.dw, op.dh);
+              vfStateCache.delete(op.sid);
+              vfStateCache.set(op.sid, bmp);
+              debugStats.cache++;
+              recordDebugRect(op.dx, op.dy, op.dw, op.dh, "cache", "RAM CACHE (0 KB)");
+            } else {
+              recordDebugRect(op.dx, op.dy, op.dw, op.dh, "miss", "CACHE MISS!");
+            }
           }
         }
       }
@@ -912,7 +985,7 @@
               }
               ctx.drawImage(bmp, 0, 0);
               // Full-frame packets begin a new prediction/cache epoch.
-              vfStateCache.clear();
+              clearVfStateCache();
               vfBgCanvas.width = bmp.width;
               vfBgCanvas.height = bmp.height;
               vfBgCtx.drawImage(bmp, 0, 0);
@@ -1181,6 +1254,23 @@
 
     window.addEventListener("pagehide", () => disconnect());
     window.addEventListener("beforeunload", () => disconnect());
+
+    (function initFromQueryParams() {
+      try {
+        const params = new URLSearchParams(location.search);
+        const qId = params.get("id");
+        const qPwd = params.get("pwd");
+        if (qId) {
+          document.getElementById("targetId").value = qId;
+        }
+        if (qPwd !== null) {
+          document.getElementById("targetPwd").value = qPwd;
+        }
+        if (qId && params.get("autoconnect") === "1") {
+          setTimeout(() => { if (!isConnected) toggleConnect(); }, 150);
+        }
+      } catch (e) {}
+    })();
   </script>
 </body>
 </html>

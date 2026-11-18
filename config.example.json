@@ -12,5 +12,6 @@
     "AnimationCycleRecognizer",
     "Scroll2DAndSliderRecognizer",
     "WindowMove2DRecognizer"
-  ]
+  ],
+  "shadow_repair": true
 }

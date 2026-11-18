@@ -49,7 +49,8 @@ def get_local_ipv4_addresses():
 class HostService:
     def __init__(self, relay_url, my_id, my_password, quality=55, max_fps=30,
                  scale=0.75, status_callback=None, vision_enabled=True,
-                 vision_algorithms=None):
+                 vision_algorithms=None, shadow_repair=True,
+                 emulation_mode=False, initial_source="virtual", allow_real_input=False):
         self.relay_url = relay_url
         self.my_id = my_id
         self.my_password = my_password
@@ -57,6 +58,8 @@ class HostService:
         self.max_fps = max_fps
         self.scale = scale
         self.status_callback = status_callback
+        self.emulation_mode = bool(emulation_mode)
+        self.emulation_allow_real_input = bool(allow_real_input) if self.emulation_mode else True
 
         self.running = False
         self.relay_viewers = 0
@@ -76,11 +79,21 @@ class HostService:
         self.stream_task = None
         self.clip_task = None
 
+        virtual_scene = None
+        source_mode = "desktop"
+        if self.emulation_mode:
+            from emulation import VirtualDesktopScene
+            virtual_scene = VirtualDesktopScene()
+            source_mode = "virtual" if initial_source == "virtual" else "desktop"
+
         self.capturer = ScreenCapturer(
             quality=self.quality,
             scale=self.scale,
             vision_enabled=vision_enabled,
             vision_algorithms=vision_algorithms,
+            shadow_repair=shadow_repair,
+            source_mode=source_mode,
+            virtual_scene=virtual_scene,
         )
         self.input_controller = InputController(
             self.capturer.width,
@@ -131,14 +144,28 @@ class HostService:
 
     def stop(self):
         self.running = False
-        if self.current_ws:
+        async def _cleanup():
+            for t in (self.stream_task, self.clip_task):
+                if t and not t.done():
+                    t.cancel()
+            if self.p2p_server is not None:
+                try:
+                    self.p2p_server.close()
+                    await self.p2p_server.wait_closed()
+                except Exception:
+                    pass
+                self.p2p_server = None
+            if self.current_ws:
+                try:
+                    await self.current_ws.close()
+                except Exception:
+                    pass
+        if self.loop and self.loop.is_running():
             try:
-                if self.loop and self.loop.is_running():
-                    asyncio.run_coroutine_threadsafe(self.current_ws.close(), self.loop)
+                fut = asyncio.run_coroutine_threadsafe(_cleanup(), self.loop)
+                fut.result(timeout=1.5)
             except Exception:
                 pass
-        if self.loop and self.loop.is_running():
-            self.loop.call_soon_threadsafe(self.loop.stop)
 
     def _run_thread(self):
         self.loop = asyncio.new_event_loop()
@@ -156,18 +183,20 @@ class HostService:
         """Starts a local direct WebSocket P2P listener so LAN/VPN/direct peers bypass the VPS completely."""
         if self.p2p_server is not None:
             return
-        for port in range(8766, 8776):
+        bind_host = "127.0.0.1" if self.emulation_mode else "0.0.0.0"
+        port_range = range(18766, 18776) if self.emulation_mode else range(8766, 8776)
+        for port in port_range:
             try:
                 self.p2p_server = await websockets.serve(
                     self._handle_direct_p2p_client,
-                    "0.0.0.0",
+                    bind_host,
                     port,
                     max_size=20 * 1024 * 1024,
                     ping_interval=20,
                     ping_timeout=40
                 )
                 self.p2p_port = port
-                logging.info(f"Direct P2P listener active on 0.0.0.0:{port}")
+                logging.info(f"Direct P2P listener active on {bind_host}:{port}")
                 return
             except Exception:
                 continue
@@ -175,6 +204,8 @@ class HostService:
     def _get_p2p_endpoints(self):
         if not self.p2p_port:
             return []
+        if self.emulation_mode:
+            return [f"ws://127.0.0.1:{self.p2p_port}"]
         return [f"ws://{ip}:{self.p2p_port}" for ip in get_local_ipv4_addresses()]
 
     def _build_screen_info_payload(self):
@@ -182,9 +213,12 @@ class HostService:
             "type": "screen_info",
             "width": self.capturer.width,
             "height": self.capturer.height,
+            "source_mode": getattr(self.capturer, "source_mode", "desktop"),
+            "emulation_mode": self.emulation_mode,
+            "allow_real_input": self.emulation_allow_real_input,
             "p2p_endpoints": self._get_p2p_endpoints(),
             "p2p_token": self.p2p_token,
-            "webrtc_supported": HAS_WEBRTC
+            "webrtc_supported": False if self.emulation_mode else HAS_WEBRTC
         }
 
     async def _handle_direct_p2p_client(self, ws):
@@ -468,14 +502,40 @@ class HostService:
             elif msg_type == "input":
                 evt_data = data.get("data", {})
                 if evt_data.get("event") == "request_keyframe":
+                    logging.info("[VF-DEBUG][HOST] request_keyframe received -> resetting vision state")
                     self.capturer.reset_vision_state()
                     self.force_frame = True
+                elif (getattr(self.capturer, "source_mode", "desktop") == "virtual"
+                      and getattr(self.capturer, "virtual_scene", None) is not None):
+                    self.capturer.notify_input(evt_data)
+                    self.capturer.virtual_scene.handle_event(evt_data)
+                    if evt_data.get("event") != "mouse_move":
+                        self.force_frame = True
+                elif self.emulation_mode and not self.emulation_allow_real_input:
+                    # Safe View-Only mode during local real-desktop loopback (prevents cursor feedback loop)
+                    pass
                 else:
                     self.capturer.notify_input(evt_data)
                     self.input_controller.handle_event(evt_data)
                     if evt_data.get("event") != "mouse_move":
                         self.force_frame = True
                 self._ensure_background_tasks()
+
+            elif msg_type == "set_emulation_source" and self.emulation_mode:
+                mode = "virtual" if data.get("mode") == "virtual" else "desktop"
+                self.capturer.set_source_mode(mode)
+                self.input_controller.width = self.capturer.width
+                self.input_controller.height = self.capturer.height
+                self.input_controller.left = self.capturer.left
+                self.input_controller.top = self.capturer.top
+                self.force_frame = True
+                await self._broadcast_json(self._build_screen_info_payload())
+                logging.info(f"[EMULATION] Switched capture source to '{mode}' ({self.capturer.width}x{self.capturer.height})")
+
+            elif msg_type == "set_emulation_input" and self.emulation_mode:
+                self.emulation_allow_real_input = bool(data.get("enabled", False))
+                await self._broadcast_json(self._build_screen_info_payload())
+                logging.info(f"[EMULATION] Real OS input forwarding: {'ENABLED' if self.emulation_allow_real_input else 'LOCKED (Safe)'}")
 
             elif msg_type == "set_quality":
                 self.capturer.update_settings(
@@ -493,6 +553,7 @@ class HostService:
                 if hasattr(self.capturer, "reload_vision_pipeline"):
                     self.capturer.reload_vision_pipeline()
                 try:
+                    import importlib
                     import input_controller
                     importlib.reload(input_controller)
                     self.input_controller = input_controller.InputController(
@@ -508,6 +569,25 @@ class HostService:
                 logging.info("Vision pipeline hot-reloaded via network control command.")
         except Exception as e:
             logging.warning(f"Error processing control input: {e}")
+
+    async def _broadcast_json(self, payload_dict):
+        payload = json.dumps(payload_dict)
+        for p2p_ws in list(self.p2p_ws_clients):
+            try:
+                await p2p_ws.send(payload)
+            except Exception:
+                pass
+        for channel in list(self.webrtc_channels):
+            try:
+                if getattr(channel, "readyState", "") == "open":
+                    channel.send(payload)
+            except Exception:
+                pass
+        if self.relay_viewers > 0 and self.current_ws:
+            try:
+                await self.current_ws.send(payload)
+            except Exception:
+                pass
 
     async def _connect_and_serve(self):
         await self._start_p2p_server()
