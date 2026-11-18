@@ -2,7 +2,7 @@ import os
 import struct
 import sys
 import time
-from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QByteArray, QBuffer, QIODevice
+from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QByteArray, QBuffer, QIODevice, QTimer
 from PySide6.QtGui import (
     QImage, QPixmap, QIcon, QPainter, QPainterPath,
     QColor, QLinearGradient, QPen, QBrush
@@ -189,21 +189,31 @@ def export_icon_files(ico_path="desklite.ico", icns_path="desklite.icns"):
 class DeskLiteApp(QMainWindow):
     status_sig = Signal(str, str)
 
-    def __init__(self):
+    def __init__(self, emulate_only=False):
         super().__init__()
+        self.emulate_only = bool(emulate_only)
         is_sys = common.is_system()
         is_adm = common.is_admin()
-        role_tag = "[SYSTEM]" if is_sys else ("[Administrator]" if is_adm and sys.platform == "win32" else "")
+        role_tag = "[EMULATION]" if self.emulate_only else (
+            "[SYSTEM]" if is_sys else ("[Administrator]" if is_adm and sys.platform == "win32" else "")
+        )
         self.setWindowTitle(f"DeskLite {role_tag} - Remote Desktop".replace("  ", " "))
-        self.setFixedSize(640, 450)
+        self.setFixedSize(660, 460)
 
         self.config = common.load_config()
         self.host_service = None
+        self.emu_relay = None
+        self.emu_host = None
+        self.emu_viewer = None
         self.active_viewers = []
 
         self.status_sig.connect(self._apply_host_status)
         self._build_ui()
-        self.start_host_service()
+        if self.emulate_only:
+            self._apply_host_status("online", "Local Emulation Mode (no VPS connection)")
+            QTimer.singleShot(80, self.start_emulation_mode)
+        else:
+            self.start_host_service()
 
     def _build_ui(self):
         central = QWidget(self)
@@ -409,10 +419,14 @@ class DeskLiteApp(QMainWindow):
         server_row.addWidget(btn_processing)
         root_layout.addLayout(server_row)
 
-        # BOTTOM ROW 2: Platform / SYSTEM & UAC Controls
+        # BOTTOM ROW 2: Platform / SYSTEM & Emulation Controls
         service_row = QHBoxLayout()
         service_row.setSpacing(8)
-        if sys.platform == "win32":
+        if self.emulate_only:
+            lbl_emu = QLabel("🧪 Local Emulation Mode (Host = Client on 127.0.0.1)")
+            lbl_emu.setStyleSheet("color: #0284c7; font-weight: 700; font-size: 12px;")
+            service_row.addWidget(lbl_emu)
+        elif sys.platform == "win32":
             if common.is_system():
                 lbl_sys = QLabel("🛡️ SYSTEM Mode Active (UAC controllable)")
                 lbl_sys.setStyleSheet("color: #15803d; font-weight: 700; font-size: 12px;")
@@ -432,6 +446,14 @@ class DeskLiteApp(QMainWindow):
             lbl_mac.setStyleSheet("color: #1d4ed8; font-weight: 700; font-size: 12px;")
             service_row.addWidget(lbl_mac)
         service_row.addStretch(1)
+        self.btn_emulate = QPushButton("🧪 Local Emulate")
+        self.btn_emulate.setStyleSheet(
+            "QPushButton { background-color: #0284c7; color: #ffffff; border: none; border-radius: 5px; padding: 5px 12px; font-weight: 700; }"
+            "QPushButton:hover { background-color: #0369a1; }"
+        )
+        self.btn_emulate.setToolTip("Startet lokalen Relay + Host + Viewer auf 127.0.0.1 (Server = Client, ohne VPS)")
+        self.btn_emulate.clicked.connect(self.start_emulation_mode)
+        service_row.addWidget(self.btn_emulate)
         root_layout.addLayout(service_row)
 
         # Status Bar
@@ -509,12 +531,13 @@ class DeskLiteApp(QMainWindow):
         self.config["shadow_repair"] = shadow_box.isChecked()
         common.save_config(self.config)
 
-        if self.host_service:
-            self.host_service.capturer.update_processing_settings(
-                vision_enabled=self.config["vision_enabled"],
-                vision_algorithms=self.config["vision_algorithms"],
-                shadow_repair=self.config["shadow_repair"],
-            )
+        for svc in (self.host_service, self.emu_host):
+            if svc is not None:
+                svc.capturer.update_processing_settings(
+                    vision_enabled=self.config["vision_enabled"],
+                    vision_algorithms=self.config["vision_algorithms"],
+                    shadow_repair=self.config["shadow_repair"],
+                )
 
     def on_host_status(self, status, detail=""):
         self.status_sig.emit(status, detail)
@@ -542,14 +565,16 @@ class DeskLiteApp(QMainWindow):
         self.config["my_id"] = new_val
         common.save_config(self.config)
         self.lbl_id.setText(new_val)
-        self.start_host_service()
+        if not self.emulate_only:
+            self.start_host_service()
 
     def new_password(self):
         new_val = common.generate_password()
         self.config["my_password"] = new_val
         common.save_config(self.config)
         self.lbl_pw.setText(new_val)
-        self.start_host_service()
+        if not self.emulate_only:
+            self.start_host_service()
 
     def save_server(self):
         new_server = self.entry_server.text().strip()
@@ -558,7 +583,8 @@ class DeskLiteApp(QMainWindow):
             return
         self.config["relay_server"] = new_server
         common.save_config(self.config)
-        self.start_host_service()
+        if not self.emulate_only:
+            self.start_host_service()
         QMessageBox.information(self, "Saved", f"ID / Rendezvous server updated: {new_server}")
 
     def on_mode_change(self, index=None):
@@ -573,8 +599,9 @@ class DeskLiteApp(QMainWindow):
             self.config["quality"] = 75
             self.config["scale"] = 1.0
         common.save_config(self.config)
-        if self.host_service:
-            self.host_service.capturer.update_settings(quality=self.config["quality"], scale=self.config["scale"])
+        for svc in (self.host_service, self.emu_host):
+            if svc is not None:
+                svc.capturer.update_settings(quality=self.config["quality"], scale=self.config["scale"])
 
     def switch_to_system(self):
         if not common.elevate_to_system():
@@ -639,7 +666,84 @@ class DeskLiteApp(QMainWindow):
         viewer = RemoteDesktopViewer(self, relay_url, partner_id, partner_pw)
         self.active_viewers.append(viewer)
 
+    def start_emulation_mode(self):
+        """Start an isolated local relay + host + viewer (Server = Client on 127.0.0.1)."""
+        if self.emu_viewer is not None and self.emu_viewer.isVisible():
+            self.emu_viewer.raise_()
+            self.emu_viewer.activateWindow()
+            return
+
+        from emulation import LocalRelayServer
+
+        try:
+            if self.emu_relay is None or not self.emu_relay.running:
+                self.emu_relay = LocalRelayServer()
+                self.emu_relay.start()
+
+            emu_id = "EMU001"
+            emu_pw = "emu"
+
+            if self.emu_host is not None:
+                self.emu_host.stop()
+
+            self.emu_host = HostService(
+                relay_url=self.emu_relay.ws_url,
+                my_id=emu_id,
+                my_password=emu_pw,
+                quality=self.config.get("quality", 75),
+                max_fps=self.config.get("max_fps", 30),
+                scale=self.config.get("scale", 1.0),
+                vision_enabled=self.config.get("vision_enabled", True),
+                vision_algorithms=self.config.get("vision_algorithms", list(VISION_ALGORITHMS)),
+                shadow_repair=self.config.get("shadow_repair", True),
+                emulation_mode=True,
+                initial_source="virtual",
+                allow_real_input=False,
+            )
+            self.emu_host.start()
+
+            # Wait briefly so local host is already registered before viewer connects
+            deadline = time.time() + 2.0
+            while time.time() < deadline and emu_id not in self.emu_relay.hosts:
+                time.sleep(0.02)
+
+            web_url = f"{self.emu_relay.http_url}/?id={emu_id}&pwd={emu_pw}&autoconnect=1"
+            self.emu_viewer = RemoteDesktopViewer(
+                self,
+                self.emu_relay.ws_url,
+                emu_id,
+                emu_pw,
+                emulate=True,
+                web_url=web_url,
+                on_close_callback=self.stop_emulation_mode,
+            )
+            self.active_viewers.append(self.emu_viewer)
+            self._apply_host_status(
+                "busy",
+                f"Emulation active on 127.0.0.1:{self.emu_relay.port} (Web: {self.emu_relay.http_url})"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Emulation Error", f"Could not start local emulation mode:\n{e}")
+
+    def stop_emulation_mode(self):
+        self.emu_viewer = None
+        try:
+            if self.emu_host is not None:
+                self.emu_host.stop()
+                self.emu_host = None
+        except Exception:
+            pass
+        try:
+            if self.emu_relay is not None:
+                self.emu_relay.stop()
+                self.emu_relay = None
+        except Exception:
+            pass
+        if self.emulate_only:
+            self._apply_host_status("online", "Local Emulation Mode ready (closed session)")
+
     def shutdown_and_exit(self):
+        self.stop_emulation_mode()
         try:
             if self.host_service:
                 self.host_service.stop()
@@ -684,27 +788,29 @@ if __name__ == "__main__":
     elif "--service" in sys.argv:
         run_as_service()
     else:
-        # 0. If a DeskLite window is already running, focus it immediately and exit
-        if common.focus_existing_instance():
-            sys.exit(0)
+        emulate_flag = "--emulate" in sys.argv
+        if not emulate_flag:
+            # 0. If a DeskLite window is already running, focus it immediately and exit
+            if common.focus_existing_instance():
+                sys.exit(0)
 
-        # 1. Enforce Administrator privileges on start (via pythonw.exe so no console stays open)
-        if not common.is_admin():
-            common.restart_as_admin()
+            # 1. Enforce Administrator privileges on start (via pythonw.exe so no console stays open)
+            if not common.is_admin():
+                common.restart_as_admin()
 
-        # 2. Automatically elevate from Admin to interactive SYSTEM in the current session
-        #    so DeskLite has the same integrity level (0x4000) as consent.exe (UAC dialogs)
-        if common.is_admin() and not common.is_system() and "--system" not in sys.argv:
-            common.elevate_to_system()
+            # 2. Automatically elevate from Admin to interactive SYSTEM in the current session
+            #    so DeskLite has the same integrity level (0x4000) as consent.exe (UAC dialogs)
+            if common.is_admin() and not common.is_system() and "--system" not in sys.argv:
+                common.elevate_to_system()
 
-        # 3. Acquire single-instance mutex so multiple host instances can never conflict
-        common.ensure_single_instance()
+            # 3. Acquire single-instance mutex so multiple host instances can never conflict
+            common.ensure_single_instance()
 
-        # 4. Clean up any broken legacy service entry & ensure normal UAC prompt (never auto-confirm!)
-        common.cleanup_broken_service()
-        cfg = common.load_config()
-        if not cfg.get("uac_secure_desktop", False):
-            common.set_uac_secure_desktop(False)
+            # 4. Clean up any broken legacy service entry & ensure normal UAC prompt (never auto-confirm!)
+            common.cleanup_broken_service()
+            cfg = common.load_config()
+            if not cfg.get("uac_secure_desktop", False):
+                common.set_uac_secure_desktop(False)
 
         if sys.platform == "win32":
             try:
@@ -719,7 +825,7 @@ if __name__ == "__main__":
         app_icon = create_app_icon()
         app.setWindowIcon(app_icon)
 
-        window = DeskLiteApp()
+        window = DeskLiteApp(emulate_only=emulate_flag)
         window.setWindowIcon(app_icon)
         window.show()
         sys.exit(app.exec())

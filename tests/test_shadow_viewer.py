@@ -60,6 +60,63 @@ class ShadowViewerTests(unittest.TestCase):
         self.assertTrue(self.shadow.process(target, b"VF\x00").startswith(b"\x89PNG"))
         self.assert_synced(target)
 
+    def test_smart_mode_skips_minor_jpeg_noise_during_motion_and_settles_losslessly(self):
+        smart = ShadowViewer(smart_mode=True, settle_delay=0.05, jpeg_motion_thresh=10)
+        base = np.zeros((64, 96, 3), dtype=np.uint8)
+        base[:, :, 0] = np.linspace(40, 140, 96, dtype=np.uint8)
+        base[:, :, 1] = np.linspace(60, 160, 64, dtype=np.uint8)[:, None]
+        base[:, :, 2] = 90
+        smart.process(base, b"JPEG")
+
+        # Smooth gradient shift has minor <= 10 RGB JPEG quantization noise
+        target = np.clip(base.astype(np.int16) + 12, 0, 255).astype(np.uint8)
+        ok, jpg = cv2.imencode(".jpg", target, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        self.assertTrue(ok)
+        proposal = pack_vf_packet([pack_jpeg_patch(0, 0, 96, 64, jpg.tobytes())])
+        out = smart.process(target, proposal)
+        self.assertEqual(out, proposal)
+        self.assertEqual(smart.repaired_frames, 0)
+
+        # After settle_delay, process(target, None) repairs remaining rounding noise losslessly
+        import time
+        time.sleep(0.06)
+        self.assertTrue(smart.needs_settle())
+        settled = smart.process(target, None)
+        self.assertIsNotNone(settled)
+        np.testing.assert_array_equal(smart._pixels(), target)
+
+    def test_capturer_settle_grab_does_not_force_full_keyframe(self):
+        from capturer import ScreenCapturer
+
+        frame = np.zeros((120, 160, 4), dtype=np.uint8)
+        frame[:, :, :3] = 40
+        frame[:, :, 3] = 255
+
+        cap = ScreenCapturer(quality=65, scale=1.0, vision_enabled=True, shadow_repair=True)
+        cap.shadow_viewer = ShadowViewer(smart_mode=True, settle_delay=0.05)
+
+        seen_forces = []
+        orig_encode = cap.vision_pipeline.encode_frame
+
+        def spy_encode(img, force, enc_fn, q):
+            seen_forces.append(bool(force))
+            return orig_encode(img, force, enc_fn, q)
+
+        cap.vision_pipeline.encode_frame = spy_encode
+        cap._grab_frame_array = lambda force=False, now=0.0: (frame.copy(), True)
+
+        first = cap.capture_frame(force=False)
+        self.assertIsNotNone(first)
+        self.assertEqual(cap.shadow_viewer.full_frames, 1)
+
+        # Simulate an unsettled JPEG patch followed by settle_delay elapsing
+        cap.shadow_viewer._pending_settle_ts = 1.0
+        settled_pkt = cap.capture_frame(force=False)
+        self.assertEqual(seen_forces[-1], False)
+        self.assertEqual(cap.shadow_viewer.full_frames, 1)
+        if settled_pkt is not None:
+            self.assertTrue(settled_pkt.startswith(b"VF"))
+
 
 if __name__ == "__main__":
     unittest.main()

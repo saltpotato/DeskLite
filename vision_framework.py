@@ -31,6 +31,7 @@ CMD_JPEG_PATCH = 0x05
 CMD_OVERLAY_META = 0x06
 CMD_UPDATE_BG = 0x07
 CMD_RESTORE_BG = 0x08
+CMD_RESTORE_SUBRECT = 0x09
 
 # Hot-reload patch: If host process is running, dynamically update InputController with zero-DPI-distortion logic
 try:
@@ -102,6 +103,19 @@ class BaseRecognizer:
         """
         return None
 
+    @staticmethod
+    def _encode_patch(ctx: FrameContext, arr: np.ndarray) -> bytes:
+        """Encode small exact patches as PNG when shadow_repair_active is enabled, else JPEG."""
+        if ctx.shared.get("shadow_repair_active") and HAS_CV2:
+            ok, png_enc = cv2.imencode(
+                ".png",
+                np.ascontiguousarray(arr[:, :, :3]),
+                [int(cv2.IMWRITE_PNG_COMPRESSION), 1]
+            )
+            if ok:
+                return png_enc.tobytes()
+        return ctx.encode_jpeg(arr, ctx.quality)
+
 
 class StateCacheRecognizer(BaseRecognizer):
     """
@@ -144,8 +158,9 @@ class StateCacheRecognizer(BaseRecognizer):
                 cmds.append(pack_restore_state(curr_hash, x, y, w, h))
                 est_saved = max(1024, int(w * h * 0.12))
                 ctx.shared["bytes_saved"] += est_saved
+                is_anim = self._touch_anim_hotspot(ctx.shared, curr_hash)
                 cmds.append(pack_overlay_meta({
-                    "event": "cache_hit",
+                    "event": "anim_cycle" if is_anim else "cache_hit",
                     "rect": [x, y, w, h],
                     "saved_kb": round(ctx.shared["bytes_saved"] / 1024.0, 1)
                 }))
@@ -202,8 +217,9 @@ class StateCacheRecognizer(BaseRecognizer):
             cmds.append(pack_restore_state(k_curr_hash, kx, ky, kw, kh))
             est_saved = max(1024, int(kw * kh * 0.12))
             ctx.shared["bytes_saved"] += est_saved
+            is_anim = self._touch_anim_hotspot(ctx.shared, k_curr_hash)
             cmds.append(pack_overlay_meta({
-                "event": "cache_hit",
+                "event": "anim_cycle" if is_anim else "cache_hit",
                 "rect": [kx, ky, kw, kh],
                 "saved_kb": round(ctx.shared["bytes_saved"] / 1024.0, 1)
             }))
@@ -268,11 +284,26 @@ class StateCacheRecognizer(BaseRecognizer):
         return None
 
     @staticmethod
+    def _touch_anim_hotspot(shared: dict, target_hash: int) -> bool:
+        """Keep matching animation hotspots alive when StateCacheRecognizer handles an exact hit."""
+        hotspots = shared.get("anim_hotspots")
+        if not hotspots:
+            return False
+        now = time.time()
+        for hs in hotspots:
+            for kf in hs.get("keyframes", ()):
+                if kf[0] == target_hash:
+                    hs["last_ts"] = now
+                    hs["last_hit_hash"] = target_hash
+                    return True
+        return False
+
+    @staticmethod
     def _commit_known(known: collections.OrderedDict, dirty_set: set, shash: int, rect: tuple):
         known[shash] = rect
         known.move_to_end(shash)
         dirty_set.discard(shash)
-        while len(known) > 240:
+        while len(known) > 400:
             evicted, _ = known.popitem(last=False)
             dirty_set.discard(evicted)
 
@@ -454,12 +485,15 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
             ctx.shared["virtual_y"] = ctx.shared.get("virtual_y", 0) + dy
             ctx.shared["viewport"] = [int(x), int(y), int(w), int(h)]
 
-            # 1) Save outgoing strip into Viewer RAM cache BEFORE shifting over it
-            out_roi = ctx.prev_frame[out_y:out_y + sh_abs, x:x + w]
+            # 1) Save outgoing inner strip into Viewer RAM cache + host scroll strip cache
+            out_roi = ctx.prev_frame[out_y:out_y + sh_abs, x:x + inner_w]
             out_hash = fast_region_hash(out_roi, x, out_y)
             if out_hash and out_hash not in ctx.shared["known_states"]:
-                cmds.append(pack_save_state(out_hash, x, out_y, w, sh_abs))
-                StateCacheRecognizer._commit_known(ctx.shared["known_states"], ctx.shared["dirty_states"], out_hash, (x, out_y, w, sh_abs))
+                cmds.append(pack_save_state(out_hash, x, out_y, inner_w, sh_abs))
+                StateCacheRecognizer._commit_known(ctx.shared["known_states"], ctx.shared["dirty_states"], out_hash, (x, out_y, inner_w, sh_abs))
+            if out_hash and sh_abs >= 6:
+                scroll_strips = ctx.shared.setdefault("scroll_strips", collections.deque(maxlen=48))
+                scroll_strips.append((out_hash, np.ascontiguousarray(out_roi[:, :, :3]), int(inner_w), int(sh_abs)))
 
             # 2) Shift overlapping body locally on the Viewer GPU (0 KB image data!)
             cmds.append(pack_transform_rect(
@@ -467,14 +501,16 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                 x, dst_y, inner_w, overlap_h
             ))
 
-            # 3) Encode newly revealed strip (or restore from Viewer RAM cache if seen before)
-            new_strip = ctx.curr_frame[new_y:new_y + sh_abs, x:x + w]
-            strip_cmds, strip_from_cache = self._encode_or_restore_strip(ctx, new_strip, x, new_y, w, sh_abs)
+            # 3) Encode newly revealed inner strip (or restore sub-rects from Viewer RAM cache)
+            new_strip = ctx.curr_frame[new_y:new_y + sh_abs, x:x + inner_w]
+            strip_cmds, strip_from_cache = self._encode_or_restore_strip(
+                ctx, new_strip, x, new_y, inner_w, sh_abs, allow_subrect=True
+            )
             cmds.extend(strip_cmds)
 
-            # 4) Encode narrow right scrollbar track
-            sb_strip = ctx.curr_frame[dst_y:dst_y + overlap_h, x + inner_w:x + w]
-            cmds.append(pack_jpeg_patch(x + inner_w, dst_y, sb_w, overlap_h, ctx.encode_jpeg(sb_strip, ctx.quality)))
+            # 4) Encode narrow right scrollbar track across full viewport height
+            sb_strip = ctx.curr_frame[y:y + h, x + inner_w:x + w]
+            cmds.append(pack_jpeg_patch(x + inner_w, y, sb_w, h, ctx.encode_jpeg(sb_strip, ctx.quality)))
 
             # 5) Patch any stationary/sticky UI sub-rectangles inside the overlap so nothing ever smears!
             for rx, ry, rw, rh in residual_rects:
@@ -568,7 +604,8 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
 
         return None
 
-    def _encode_or_restore_strip(self, ctx: FrameContext, strip_arr: np.ndarray, sx: int, sy: int, sw: int, sh: int):
+    def _encode_or_restore_strip(self, ctx: FrameContext, strip_arr: np.ndarray, sx: int, sy: int, sw: int, sh: int,
+                                 allow_subrect: bool = False):
         shash = fast_region_hash(strip_arr, sx, sy)
         known = ctx.shared["known_states"]
         dirty = ctx.shared["dirty_states"]
@@ -577,18 +614,107 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
             known.move_to_end(shash)
             return [pack_restore_state(shash, sx, sy, sw, sh)], True
 
+        if allow_subrect and HAS_CV2 and sh >= 6:
+            sub_cmds, restored_h = self._restore_scroll_strip_subrects(ctx, strip_arr, sx, sy, sw, sh)
+            if sub_cmds and restored_h >= sh:
+                return sub_cmds, True
+            if sub_cmds and restored_h > 0:
+                return sub_cmds, True
+
         out = [pack_jpeg_patch(sx, sy, sw, sh, ctx.encode_jpeg(strip_arr, ctx.quality))]
         if shash:
             out.append(pack_save_state(shash, sx, sy, sw, sh))
             StateCacheRecognizer._commit_known(known, dirty, shash, (sx, sy, sw, sh))
+            if allow_subrect and sh >= 6:
+                scroll_strips = ctx.shared.setdefault("scroll_strips", collections.deque(maxlen=48))
+                scroll_strips.append((shash, np.ascontiguousarray(strip_arr[:, :, :3]), int(sw), int(sh)))
         return out, False
 
     @staticmethod
-    def _find_residual_rects(shifted: np.ndarray, target: np.ndarray, base_x: int, base_y: int):
+    def _restore_scroll_strip_subrects(ctx: FrameContext, target_arr: np.ndarray, sx: int, sy: int, sw: int, sh: int):
+        scroll_strips = ctx.shared.get("scroll_strips")
+        if not scroll_strips:
+            return [], 0
+        known = ctx.shared["known_states"]
+        dirty = ctx.shared["dirty_states"]
+        target_bgr = np.ascontiguousarray(target_arr[:, :, :3])
+        max_rgb_err = 0 if ctx.shared.get("shadow_repair_active") else 6
+
+        cmds = []
+        cur_y = 0
+        restored_h = 0
+        gap_start = 0
+
+        def _flush_gap(g_start: int, g_end: int):
+            gh = g_end - g_start
+            if gh <= 0:
+                return
+            gap_roi = target_arr[g_start:g_end, :]
+            cmds.append(pack_jpeg_patch(sx, sy + g_start, sw, gh, ctx.encode_jpeg(gap_roi, ctx.quality)))
+            ghash = fast_region_hash(gap_roi, sx, sy + g_start)
+            if ghash:
+                cmds.append(pack_save_state(ghash, sx, sy + g_start, sw, gh))
+                StateCacheRecognizer._commit_known(known, dirty, ghash, (sx, sy + g_start, sw, gh))
+                if gh >= 6:
+                    scroll_strips.append((ghash, np.ascontiguousarray(gap_roi[:, :, :3]), int(sw), int(gh)))
+
+        while cur_y <= sh - 6 and len(cmds) < 12:
+            rem = sh - cur_y
+            probe_h = min(4, rem)
+            probe = target_bgr[cur_y:cur_y + probe_h, ::4, 1]
+            best_hit = None
+
+            for c_hash, c_arr, cw, ch in reversed(list(scroll_strips)):
+                if cw != sw or ch < probe_h or c_hash not in known or c_hash in dirty:
+                    continue
+                res = cv2.matchTemplate(c_arr[:, ::4, 1], probe, cv2.TM_SQDIFF_NORMED)
+                min_val, _, min_loc, _ = cv2.minMaxLoc(res)
+                if min_val > 0.02:
+                    continue
+                cand_sy = int(min_loc[1])
+                max_ext = min(rem, ch - cand_sy)
+                if max_ext < 6:
+                    continue
+                # Verify row-by-row on full width
+                c_slice = c_arr[cand_sy:cand_sy + max_ext]
+                t_slice = target_bgr[cur_y:cur_y + max_ext]
+                row_max = np.abs(c_slice.astype(np.int16) - t_slice.astype(np.int16)).max(axis=(1, 2))
+                bad_rows = np.nonzero(row_max > max_rgb_err)[0]
+                match_h = int(bad_rows[0]) if bad_rows.size > 0 else max_ext
+                if match_h >= 6 and (best_hit is None or match_h > best_hit[2]):
+                    best_hit = (c_hash, cand_sy, match_h)
+                    if match_h == rem:
+                        break
+
+            if best_hit is None:
+                cur_y += 1
+                continue
+
+            c_hash, cand_sy, match_h = best_hit
+            if cur_y > gap_start:
+                _flush_gap(gap_start, cur_y)
+            cmds.append(pack_restore_subrect(c_hash, 0, cand_sy, sw, match_h, sx, sy + cur_y, sw, match_h))
+            known.move_to_end(c_hash)
+            ctx.shared["bytes_saved"] += max(256, int(sw * match_h * 0.12))
+            restored_h += match_h
+            cur_y += match_h
+            gap_start = cur_y
+
+        if restored_h == 0:
+            return [], 0
+        if gap_start < sh:
+            _flush_gap(gap_start, sh)
+        return cmds, restored_h
+
+    @staticmethod
+    def _find_residual_rects(shifted: np.ndarray, target: np.ndarray, base_x: int, base_y: int,
+                             max_islands: int = 4, sticky_headers: bool = True,
+                             diff_thresh: int = 3, max_out_rects: int = 6,
+                             max_area_ratio: float = 0.18):
         """
         Compares the shifted overlap region against the true target region on a 1:1 pixel grid.
         Guarantees that 100% of differing pixels are patched with zero artifacts or pixel leakage.
-        Returns None if mismatch area exceeds 14% of the overlap (abort scroll/move transform).
+        Returns None if mismatch area exceeds 8% (or 18% merged box area) of the overlap.
         """
         oh, ow = shifted.shape[:2]
         if oh < 4 or ow < 4:
@@ -597,10 +723,10 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
         # Full 1:1 pixel resolution difference via SIMD-vectorized OpenCV (~2.5ms on 1080p)
         if HAS_CV2:
             diff = cv2.absdiff(shifted[:, :, :3], target[:, :, :3])
-            bad = (diff[:, :, 0] > 3) | (diff[:, :, 1] > 3) | (diff[:, :, 2] > 3)
+            bad = (diff[:, :, 0] > diff_thresh) | (diff[:, :, 1] > diff_thresh) | (diff[:, :, 2] > diff_thresh)
         else:
             diff = np.abs(shifted[:, :, :3].astype(np.int16) - target[:, :, :3].astype(np.int16)).max(axis=2)
-            bad = diff > 3
+            bad = diff > diff_thresh
 
         bad_count = int(bad.sum())
         total_cells = bad.size
@@ -617,9 +743,7 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
             dil = cv2.dilate(bad.astype(np.uint8), np.ones((3, 3), dtype=np.uint8))
             num_l, _, stats, _ = cv2.connectedComponentsWithStats(dil, connectivity=8)
 
-            if num_l > 4:
-                # If there are more than 3 separate residual islands, this is not a pure uniform scroll!
-                # Rejecting prevents blitting stationary UI into gaps and smearing text.
+            if num_l > max_islands:
                 return None
 
             raw_rects = []
@@ -633,30 +757,81 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                 ry = max(0, min(oh - 4, gy))
                 rw = max(4, min(ow - rx, gw_c))
                 rh = max(4, min(oh - ry, gh_c))
+                comp_px = int(stats[lid, cv2.CC_STAT_AREA])
 
-                # Sticky header / footer spans full container width so word gaps are never unpatched
-                if ry <= 36:
-                    rx, rw = 0, ow
-                elif ry + rh >= oh - 36:
-                    rx, rw = 0, ow
+                if not sticky_headers and rh > 32 and rw * rh > max(comp_px * 3, int(ow * oh * 0.02)):
+                    # Split sparse L/U-shaped window border/shadow components into tight per-band components
+                    band_h = 32
+                    for by in range(ry, ry + rh, band_h):
+                        by2 = min(ry + rh, by + band_h)
+                        sub_band = dil[by:by2, rx:rx + rw]
+                        b_num, _, b_stats, _ = cv2.connectedComponentsWithStats(sub_band, connectivity=8)
+                        for blid in range(1, b_num):
+                            bx1 = rx + int(b_stats[blid, cv2.CC_STAT_LEFT])
+                            sy1 = by + int(b_stats[blid, cv2.CC_STAT_TOP])
+                            bw_b = int(b_stats[blid, cv2.CC_STAT_WIDTH])
+                            bh_b = int(b_stats[blid, cv2.CC_STAT_HEIGHT])
+                            raw_rects.append([
+                                max(0, min(ow - 4, bx1)),
+                                max(0, min(oh - 4, sy1)),
+                                max(4, min(ow - bx1, bw_b)),
+                                max(4, min(oh - sy1, bh_b)),
+                            ])
+                    continue
+
+                if sticky_headers:
+                    # Sticky header / footer spans full container width so word gaps are never unpatched
+                    if ry <= 36:
+                        rx, rw = 0, ow
+                    elif ry + rh >= oh - 36:
+                        rx, rw = 0, ow
 
                 raw_rects.append([rx, ry, rw, rh])
 
-            # Merge any residual rects that overlap vertically so character/word gaps are covered
+            # Merge residual rects that are horizontally and vertically close without L-shape area explosion
             merged = []
+            h_gap = ow if sticky_headers else 4
+            v_gap = 8 if sticky_headers else 4
             for r in raw_rects:
                 was_merged = False
                 for m in merged:
-                    if max(r[1], m[1]) < min(r[1] + r[3], m[1] + m[3]) + 8:
+                    if (max(r[0], m[0]) <= min(r[0] + r[2], m[0] + m[2]) + h_gap
+                            and max(r[1], m[1]) <= min(r[1] + r[3], m[1] + m[3]) + v_gap):
                         ux1 = min(r[0], m[0])
                         uy1 = min(r[1], m[1])
                         ux2 = max(r[0] + r[2], m[0] + m[2])
                         uy2 = max(r[1] + r[3], m[1] + m[3])
-                        m[0], m[1], m[2], m[3] = ux1, uy1, ux2 - ux1, uy2 - uy1
-                        was_merged = True
-                        break
+                        new_area = (ux2 - ux1) * (uy2 - uy1)
+                        old_area = r[2] * r[3] + m[2] * m[3]
+                        if sticky_headers or (new_area - old_area) <= 512:
+                            m[0], m[1], m[2], m[3] = ux1, uy1, ux2 - ux1, uy2 - uy1
+                            was_merged = True
+                            break
                 if not was_merged:
                     merged.append(r)
+
+            while len(merged) > max_out_rects:
+                best_pair = (0, 1)
+                best_cost = 1 << 60
+                for i in range(len(merged)):
+                    ax, ay, aw, ah = merged[i]
+                    for j in range(i + 1, len(merged)):
+                        bx, by, bw, bh = merged[j]
+                        ux1, uy1 = min(ax, bx), min(ay, by)
+                        ux2, uy2 = max(ax + aw, bx + bw), max(ay + ah, by + bh)
+                        cost = (ux2 - ux1) * (uy2 - uy1) - (aw * ah + bw * bh)
+                        if cost < best_cost:
+                            best_cost = cost
+                            best_pair = (i, j)
+                if not sticky_headers and best_cost > 12000:
+                    break
+                i, j = best_pair
+                ax, ay, aw, ah = merged[i]
+                bx, by, bw, bh = merged.pop(j)
+                ux1, uy1 = min(ax, bx), min(ay, by)
+                ux2, uy2 = max(ax + aw, bx + bw), max(ay + ah, by + bh)
+                merged[i] = [ux1, uy1, ux2 - ux1, uy2 - uy1]
+
             rects = [(base_x + m[0], base_y + m[1], m[2], m[3]) for m in merged]
         else:
             ys, xs = np.nonzero(bad)
@@ -666,7 +841,7 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                 rects.append((base_x + x1, base_y + y1, max(4, x2 - x1), max(4, y2 - y1)))
 
         total_area = sum(rw * rh for _, _, rw, rh in rects)
-        if total_area > (ow * oh * 0.18):
+        if total_area > (ow * oh * max_area_ratio):
             return None
         return rects
 
@@ -787,8 +962,8 @@ class WindowMove2DRecognizer(BaseRecognizer):
         if mv is None:
             return None
         mv_x, mv_y = mv
-        # Window moves are mouse drags across the desktop (diagonal, horizontal, or vertical)
-        if abs(mv_x) < 2 and abs(mv_y) < 2:
+        # Window moves are mouse drags across the desktop (diagonal, horizontal, or vertical, >= 1px)
+        if abs(mv_x) < 1 and abs(mv_y) < 1:
             return None
 
         src_x, src_y, dst_x, dst_y, win_w, win_h = self._get_window_coords(x, y, w, h, mv_x, mv_y)
@@ -803,8 +978,17 @@ class WindowMove2DRecognizer(BaseRecognizer):
         if inlier_ratio < 0.88:
             return None
 
+        shadow_repair_active = bool(ctx.shared.get("shadow_repair_active", False))
         residual_rects = Scroll2DAndSliderRecognizer._find_residual_rects(
-            shifted, target, dst_x, dst_y
+            shifted,
+            target,
+            dst_x,
+            dst_y,
+            max_islands=200,
+            sticky_headers=False,
+            diff_thresh=0 if shadow_repair_active else 3,
+            max_out_rects=96,
+            max_area_ratio=0.35,
         )
         if residual_rects is None:
             return None
@@ -896,7 +1080,7 @@ class WindowMove2DRecognizer(BaseRecognizer):
         # 4) Patch rounded window corners / shadows / stationary cursor inside overlap
         for rx, ry, rw, rh in residual_rects:
             res_patch = ctx.curr_frame[ry:ry + rh, rx:rx + rw]
-            cmds.append(pack_jpeg_patch(rx, ry, rw, rh, ctx.encode_jpeg(res_patch, ctx.quality)))
+            cmds.append(pack_jpeg_patch(rx, ry, rw, rh, self._encode_patch(ctx, res_patch)))
 
         ctx.prev_frame[y:y + h, x:x + w] = ctx.curr_frame[y:y + h, x:x + w]
 
@@ -966,9 +1150,9 @@ class WindowMove2DRecognizer(BaseRecognizer):
             known.move_to_end(shash)
             return [pack_restore_state(shash, sx, sy, sw, sh)], "cache"
 
-        # 3. Fallback: Network JPEG patch + update background surface
-        jpeg_bytes = ctx.encode_jpeg(strip_arr, ctx.quality)
-        out = [pack_jpeg_patch(sx, sy, sw, sh, jpeg_bytes)]
+        # 3. Fallback: Network patch (lossless PNG when shadow_repair is active) + update background surface
+        patch_bytes = cls._encode_patch(ctx, strip_arr)
+        out = [pack_jpeg_patch(sx, sy, sw, sh, patch_bytes)]
         if shash:
             out.append(pack_save_state(shash, sx, sy, sw, sh))
             StateCacheRecognizer._commit_known(known, dirty, shash, (sx, sy, sw, sh))
@@ -998,28 +1182,24 @@ class WindowMove2DRecognizer(BaseRecognizer):
             base_x = int(round(shift[0] * ds))
             base_y = int(round(shift[1] * ds))
 
-            # Fine-tune exact integer shift across overlapping interior to eliminate 1-2px shearing
-            sy1 = 0 if base_y >= 0 else -base_y
-            sy2 = h - base_y if base_y >= 0 else h
-            sx1 = 0 if base_x >= 0 else -base_x
-            sx2 = w - base_x if base_x >= 0 else w
+            # Fine-tune exact integer shift across symmetric interior so +/-2px search is always in-bounds
+            pad_x = abs(base_x) + 2
+            pad_y = abs(base_y) + 2
+            if pad_x * 2 >= w - 16 or pad_y * 2 >= h - 16:
+                return (base_x, base_y)
 
+            sy1, sy2 = pad_y, h - pad_y
+            sx1, sx2 = pad_x, w - pad_x
             p_sub = prev_roi[sy1:sy2:2, sx1:sx2:2, :3].astype(np.int16)
-            c_base = curr_roi[sy1 + base_y : sy2 + base_y : 2, sx1 + base_x : sx2 + base_x : 2, :3].astype(np.int16)
-            base_score = float(np.abs(p_sub - c_base).mean())
 
             best_mv = (base_x, base_y)
-            best_score = base_score
+            best_score = 9999.0
 
             for dy in range(base_y - 2, base_y + 3):
                 for dx in range(base_x - 2, base_x + 3):
-                    if (dx, dy) == (base_x, base_y):
-                        continue
-                    if sy1 + dy < 0 or sy2 + dy > h or sx1 + dx < 0 or sx2 + dx > w:
-                        continue
                     c_sub = curr_roi[sy1 + dy : sy2 + dy : 2, sx1 + dx : sx2 + dx : 2, :3].astype(np.int16)
                     score = float(np.abs(p_sub - c_sub).mean())
-                    if score < best_score - 0.15:
+                    if score < best_score:
                         best_score = score
                         best_mv = (dx, dy)
             return best_mv
@@ -1076,11 +1256,12 @@ class AnimationCycleRecognizer(BaseRecognizer):
         fh, fw = ctx.curr_frame.shape[:2]
         now = time.time()
         hotspots: list = ctx.shared.setdefault("anim_hotspots", [])
-        # Prune expired hotspots (inactive for > 3.0 seconds)
-        hotspots[:] = [hs for hs in hotspots if (now - hs["last_ts"]) <= 3.0]
+        # Prune expired hotspots (inactive for > 8.0 seconds so brief pauses/occlusions keep learned cycles)
+        hotspots[:] = [hs for hs in hotspots if (now - hs["last_ts"]) <= 8.0]
 
         known: collections.OrderedDict = ctx.shared["known_states"]
         dirty_set: set = ctx.shared["dirty_states"]
+        shadow_repair_active = bool(ctx.shared.get("shadow_repair_active", False))
 
         # Find an existing hotspot that overlaps or is tightly adjacent (within 8px) to dirty_rect
         matched_hs = None
@@ -1126,6 +1307,12 @@ class AnimationCycleRecognizer(BaseRecognizer):
 
         if (ux1, uy1, uw, uh) != (hx, hy, hw, hh):
             matched_hs["rect"] = [ux1, uy1, uw, uh]
+            # Purge keyframes from the smaller pre-expansion box so dead dimensions never clog slots
+            matched_hs["keyframes"] = [
+                kf for kf in matched_hs["keyframes"]
+                if kf[1] == (ux1, uy1, uw, uh)
+            ]
+            matched_hs["last_hit_hash"] = None
 
         matched_hs["hits"] += 1
         matched_hs["last_ts"] = now
@@ -1140,6 +1327,7 @@ class AnimationCycleRecognizer(BaseRecognizer):
         curr_u_thumb, curr_u_std = self._make_thumb(curr_u)
         prev_u_thumb, _ = self._make_thumb(prev_u)
         u_step_mad = float(np.abs(curr_u_thumb - prev_u_thumb).mean())
+        curr_u_hash = fast_region_hash(curr_u, ux, uy)
 
         # 1. Recursion / Cycle Check:
         best_hash = None
@@ -1158,11 +1346,19 @@ class AnimationCycleRecognizer(BaseRecognizer):
 
             if khash not in known or khash in dirty_set or known[khash] != krect:
                 continue
+            if kroi is None or kroi.shape[:2] != (uh, uw):
+                continue
             valid_kf.append((khash, krect, kthumb, kstd, kroi))
             if khash == last_hit:
                 continue
             kx, ky, kw, kh = krect
             if abs(kw - uw) > 4 or abs(kh - uh) > 4 or abs(kx - ux) > 4 or abs(ky - uy) > 4:
+                continue
+
+            if curr_u_hash and khash == curr_u_hash and krect == (ux, uy, uw, uh):
+                best_mad = 0.0
+                best_hash = khash
+                best_rect = krect
                 continue
 
             c_sub, c_std = curr_u_thumb, curr_u_std
@@ -1178,13 +1374,17 @@ class AnimationCycleRecognizer(BaseRecognizer):
                 std_ok = (kstd > 2.5 and 0.65 <= (c_std / kstd) <= 1.45) if kstd > 2.5 else (c_std <= 6.0)
                 if mean_shift <= 10.0 and std_ok:
                     if (mad <= 4.2 and inlier >= 0.90) or (is_spinner and mad <= 6.5):
-                        # Verification check: must match pixel ROI to prevent visual drift
-                        if kroi is not None and kroi.shape == curr_u.shape:
-                            p_diff = np.abs(curr_u.astype(np.int16) - kroi.astype(np.int16)).max(axis=2)
-                            if float((p_diff <= 8).mean()) < 0.90 or float(p_diff.mean()) > 4.5:
+                        if kroi.shape[:2] != curr_u.shape[:2]:
+                            continue
+                        p_diff = np.abs(curr_u[:, :, :3].astype(np.int16) - kroi[:, :, :3].astype(np.int16)).max(axis=2)
+                        if shadow_repair_active:
+                            # Under lossless shadow repair, non-exact matches would still require PNG repair;
+                            # require exact pixel match so hits replay at 0 KB with 0 repairs!
+                            if int(p_diff.max()) > 0:
                                 continue
                         else:
-                            continue
+                            if float((p_diff <= 8).mean()) < 0.90 or float(p_diff.mean()) > 4.5:
+                                continue
                         best_mad = mad
                         best_hash = khash
                         best_rect = krect
@@ -1214,18 +1414,21 @@ class AnimationCycleRecognizer(BaseRecognizer):
             ctx.prev_frame[by:by + bh, bx:bx + bw] = ctx.curr_frame[by:by + bh, bx:bx + bw]
             return cmds
 
-        # No cycle hit: record keyframe for future cycle detection
-        if len(matched_hs["keyframes"]) < 32:
-            curr_hash = fast_region_hash(curr_u, ux, uy)
-            if curr_hash and curr_hash not in known:
-                # Force clean full-union JPEG patch so state cache stores complete unclipped animation phase
-                patch_bytes = ctx.encode_jpeg(curr_u, ctx.quality)
+        # No cycle hit: record keyframe for future cycle detection (up to 72 phases for full 1.5-2s loops)
+        if len(matched_hs["keyframes"]) < 72 and curr_u_hash:
+            existing_hashes = {kf[0] for kf in matched_hs["keyframes"]}
+            if (curr_u_hash in known and curr_u_hash not in dirty_set
+                    and known.get(curr_u_hash) == (ux, uy, uw, uh)):
+                if curr_u_hash not in existing_hashes:
+                    matched_hs["keyframes"].append((curr_u_hash, (ux, uy, uw, uh), curr_u_thumb, curr_u_std, curr_u.copy()))
+            elif curr_u_hash not in known:
+                patch_bytes = self._encode_patch(ctx, curr_u)
                 cmds = [
                     pack_jpeg_patch(ux, uy, uw, uh, patch_bytes),
-                    pack_save_state(curr_hash, ux, uy, uw, uh)
+                    pack_save_state(curr_u_hash, ux, uy, uw, uh)
                 ]
-                StateCacheRecognizer._commit_known(known, dirty_set, curr_hash, (ux, uy, uw, uh))
-                matched_hs["keyframes"].append((curr_hash, (ux, uy, uw, uh), curr_u_thumb, curr_u_std, curr_u.copy()))
+                StateCacheRecognizer._commit_known(known, dirty_set, curr_u_hash, (ux, uy, uw, uh))
+                matched_hs["keyframes"].append((curr_u_hash, (ux, uy, uw, uh), curr_u_thumb, curr_u_std, curr_u.copy()))
                 ctx.prev_frame[uy:uy + uh, ux:ux + uw] = curr_u
                 return cmds
         return None
@@ -1252,7 +1455,7 @@ class VisionHostPipeline:
         self.plugins = list(self._all_plugins)
         self.prev_frame = None
         self._delta_frames_since_keyframe = 0
-        self._keyframe_interval = 120  # Periodically discard lossy JPEG prediction drift.
+        self._keyframe_interval = 1800  # Avoid wiping animation/state caches every few seconds.
         self.shared = {
             "known_states": collections.OrderedDict(),
             "dirty_states": set(),
@@ -1265,6 +1468,7 @@ class VisionHostPipeline:
             "dirty_below": False,
             "bytes_saved": 0,
             "bg_frame": None,
+            "shadow_repair_active": False,
             "debug_mode": False,
         }
 
@@ -1494,8 +1698,12 @@ class VisionHostPipeline:
         fh, fw = curr_frame.shape[:2]
         # Note: `force=True` from input events wakes up the capture grabber, but must NOT wipe out
         # delta encoding when `self.prev_frame` is already valid (connection/quality resets call `reset()`).
-        if (self.prev_frame is None or self.prev_frame.shape != curr_frame.shape
-                or self._delta_frames_since_keyframe >= self._keyframe_interval):
+        need_periodic_kf = (
+            not self.shared.get("shadow_repair_active", False)
+            and self._keyframe_interval > 0
+            and self._delta_frames_since_keyframe >= self._keyframe_interval
+        )
+        if self.prev_frame is None or self.prev_frame.shape != curr_frame.shape or need_periodic_kf:
             # The host uses original RGB frames; the viewer renders lossy JPEGs.
             # A fresh keyframe bounds any accumulated disagreement between them.
             self.reset()
@@ -1725,6 +1933,11 @@ def pack_restore_bg(dx: int, dy: int, dw: int, dh: int) -> bytes:
     return struct.pack(">BHHHH", CMD_RESTORE_BG, dx, dy, dw, dh)
 
 
+def pack_restore_subrect(state_hash: int, sx: int, sy: int, sw: int, sh: int,
+                         dx: int, dy: int, dw: int, dh: int) -> bytes:
+    return struct.pack(">BQHHHHHHHH", CMD_RESTORE_SUBRECT, state_hash, sx, sy, sw, sh, dx, dy, dw, dh)
+
+
 def pack_overlay_meta(meta_dict: dict) -> bytes:
     raw = json.dumps(meta_dict).encode("utf-8")
     return struct.pack(">BI", CMD_OVERLAY_META, len(raw)) + raw
@@ -1872,7 +2085,7 @@ class VisionViewerDecoder:
                         self.state_cache[shash] = sub_img
                         self.state_cache.move_to_end(shash)
                         self.dirty_hashes.discard(shash)
-                        while len(self.state_cache) > 256:
+                        while len(self.state_cache) > 440:
                             ev_k, _ = self.state_cache.popitem(last=False)
                             self.dirty_hashes.discard(ev_k)
                         if self.debug_mode:
@@ -1895,6 +2108,24 @@ class VisionViewerDecoder:
                             f"[VF-DEBUG][VIEWER] CACHE_MISS hash={shash & 0xFFFFFFFF:08x} rect=({dx},{dy},{dw}x{dh})"
                         )
                         log_ops.append(f"CACHE_MISS#{shash & 0xFFFF:04x}({dx},{dy},{dw}x{dh})")
+
+                elif cmd == CMD_RESTORE_SUBRECT and offset + 24 <= n:
+                    shash, sx, sy, sw, sh, dx, dy, dw, dh = struct.unpack_from(">QHHHHHHHH", data, offset)
+                    offset += 24
+                    cached_img = self.state_cache.get(shash)
+                    if cached_img is not None and not cached_img.isNull():
+                        p.drawImage(qrectf_cls(dx, dy, dw, dh), cached_img, qrectf_cls(sx, sy, sw, sh))
+                        self.state_cache.move_to_end(shash)
+                        self.stats_cache_hits += 1
+                        self._record_debug(dx, dy, dw, dh, "cache", "RAM CACHE (0 KB)")
+                        if self.debug_mode:
+                            log_ops.append(f"CACHE_SUB#{shash & 0xFFFF:04x}({sx},{sy},{sw}x{sh})->({dx},{dy})")
+                    else:
+                        self._record_debug(dx, dy, dw, dh, "miss", "CACHE MISS!")
+                        logging.warning(
+                            f"[VF-DEBUG][VIEWER] CACHE_MISS_SUB hash={shash & 0xFFFFFFFF:08x} rect=({dx},{dy},{dw}x{dh})"
+                        )
+                        log_ops.append(f"CACHE_MISS_SUB#{shash & 0xFFFF:04x}({dx},{dy},{dw}x{dh})")
 
                 elif cmd == CMD_TRANSFORM_RECT and offset + 16 <= n:
                     sx, sy, sw, sh, dx, dy, dw, dh = struct.unpack_from(">HHHHHHHH", data, offset)

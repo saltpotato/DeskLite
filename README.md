@@ -14,6 +14,14 @@ A lightweight, high-performance Remote Desktop system built in Python — featur
   - Captures frames directly from GPU VRAM (`IDXGIOutputDuplication`) with `0%` CPU overhead when the screen is idle.
   - Includes automatic interactive user token impersonation (`ImpersonateLoggedOnUser`) so DXGI works even inside a `SYSTEM` process, plus instant GDI (`mss`) fallback when Windows switches to the UAC Secure Desktop (`Winlogon`).
 - **Desktop App & HTML5 Web Viewer:** Control remote machines using the lightweight Python/Windows desktop app or directly from any browser (`http://<your-server>:8765`).
+- **Vision & Spatial Memory Codec (`VF` Protocol):**
+  - **2D GPU Scroll & Window Move:** Detects 2D scrolling (`Scroll2DAndSliderRecognizer`) and window dragging (`WindowMove2DRecognizer`, including rounded drop shadows and desktop icons) and shifts regions locally on the viewer GPU (`0 KB` image data).
+  - **RAM State & Sub-Rect Cache:** Caches repeating UI states, animation cycles (`AnimationCycleRecognizer`), and scrolled-out strips (`CMD_RESTORE_SUBRECT`) in viewer RAM for `0 KB` restoration even across variable-step scrolling.
+  - **Background Restore & Smart Shadow Repair:** Restores uncovered desktop/window backgrounds (`BackgroundRestoreRecognizer`) and runs a closed-loop `ShadowViewer` (`smart_mode`) that keeps prediction frames exact while settling JPEG quantization noise losslessly on idle.
+  - **Live Vision Debug Overlay:** Toggle **🔬 Debug** in either the desktop or web viewer to inspect `🟢 Cache`, `🟣 Anim`, `🔵 GPU-Move`, `🔷 BG-Restore`, and `🔴 Net-JPEG` regions in real time.
+- **Local Emulation Mode (`Server = Client` on `127.0.0.1`):**
+  - Test Vision, P2P, and the Web Viewer locally on a single machine without a VPS or admin elevation using `python main.py --emulate` or the **🧪 Local Emulate** button.
+  - Includes an interactive `VirtualDesktopScene` sandbox (draggable window, text editor, scrollable list, spinner, fade modal, and `Auto-Stress` toggle), a **Virtual / Desktop** source switcher (view-only safety lock + `WDA_EXCLUDEFROMCAPTURE` on real desktop loopback), and one-click **🌐 Open Web** prefill.
 - **Native 1:1 Sharpness & Quality Profiles:** Switch live between three profiles (**🚀 Fast**, **⚖️ Balanced**, **💎 HQ**) with crisp 1:1 native resolution.
 - **Immersive Fullscreen Mode:** True `100vw × 100vh` fullscreen in both browser and desktop viewer with an auto-hiding floating top toolbar that slides down on hover.
 - **Clipboard Synchronization:** Bi-directional text clipboard sync between host and viewer/browser (`Ctrl+C` / `Ctrl+V` or the **📋 Paste** toolbar button).
@@ -88,3 +96,17 @@ The compiled binary is placed in `server/web/download/DeskLite.exe` so it can be
    - Enter the **Partner ID** and password on the right card of the desktop app (or in your browser at `http://YOUR_SERVER_IP:8765`) and click **Connect**.
    - After the initial handshake, the status bar automatically switches to **`🟢 Direct P2P`** or **`🟢 Direct P2P WebRTC`** (`0 KB/s on VPS`).
    - In fullscreen mode (`⛶ Fullscreen`), the top bar hides automatically and reappears when moving the cursor to the top edge of the screen.
+
+---
+
+## 🧪 4. Local Emulation & Tests
+
+- **Local Emulation (`Server = Client`):**
+  ```bash
+  python main.py --emulate
+  ```
+  Starts an isolated local relay (`127.0.0.1:18765`), host, and viewer without requiring admin/SYSTEM elevation or an external VPS.
+- **Run Unit Tests:**
+  ```bash
+  python -m unittest discover tests -v
+  ```

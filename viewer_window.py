@@ -192,8 +192,10 @@ class RemoteDesktopViewer(QWidget):
     frame_ready_sig = Signal()
     status_sig = Signal(str)
     error_sig = Signal(str)
+    emu_state_sig = Signal()
 
-    def __init__(self, master, relay_url, target_id, password=""):
+    def __init__(self, master, relay_url, target_id, password="",
+                 emulate=False, web_url=None, on_close_callback=None):
         super().__init__(None, Qt.WindowType.Window)
         self.master_ref = master
         if master is not None and not master.windowIcon().isNull():
@@ -201,13 +203,21 @@ class RemoteDesktopViewer(QWidget):
         self.relay_url = relay_url
         self.target_id = target_id
         self.password = password
+        self.emulate = bool(emulate)
+        self.web_url = web_url
+        self.on_close_callback = on_close_callback
+        self.emu_source_mode = "virtual"
+        self.emu_allow_real_input = False
 
-        self.setWindowTitle(f"Remote Session: {target_id}")
-        self.resize(1280, 760)
+        if self.emulate:
+            self.setWindowTitle(f"DeskLite [LOCAL EMULATION: Server = Client] - {target_id}")
+        else:
+            self.setWindowTitle(f"Remote Session: {target_id}")
+        self.resize(1280, 796 if self.emulate else 760)
         self.setMinimumSize(640, 480)
 
-        self.remote_width = 1920
-        self.remote_height = 1080
+        self.remote_width = 1280 if self.emulate else 1920
+        self.remote_height = 720 if self.emulate else 1080
         self.base_qimage = None
         self.vision_decoder = VisionViewerDecoder()
 
@@ -233,9 +243,16 @@ class RemoteDesktopViewer(QWidget):
         self.frame_ready_sig.connect(self._process_latest_frame)
         self.status_sig.connect(self._update_status_label)
         self.error_sig.connect(self._show_error)
+        self.emu_state_sig.connect(self._refresh_emulation_bar)
 
         self._build_ui()
         self.show()
+        if self.emulate:
+            try:
+                from emulation import exclude_window_from_capture
+                exclude_window_from_capture(self)
+            except Exception:
+                pass
         self.canvas.setFocus()
 
         self.worker_thread = threading.Thread(target=self._run_async_worker, daemon=True)
@@ -295,8 +312,93 @@ class RemoteDesktopViewer(QWidget):
 
         root_layout.addWidget(self.toolbar)
 
+        if self.emulate:
+            self.emu_bar = QWidget(self)
+            self.emu_bar.setFixedHeight(34)
+            self.emu_bar.setStyleSheet("background-color: #0f172a; border-bottom: 1px solid #1e293b;")
+            emu_layout = QHBoxLayout(self.emu_bar)
+            emu_layout.setContentsMargins(12, 3, 12, 3)
+            emu_layout.setSpacing(8)
+
+            emu_badge = QLabel("🧪 EMULATION (Server = Client on 127.0.0.1)")
+            emu_badge.setStyleSheet("color: #38bdf8; font-size: 11px; font-weight: 700; border: none;")
+            emu_layout.addWidget(emu_badge)
+
+            self.btn_emu_source = self._make_btn(
+                "🎭 Quelle: Virtuelle Sandbox", "#0284c7", "#0ea5e9", self.toggle_emulation_source
+            )
+            emu_layout.addWidget(self.btn_emu_source)
+
+            self.btn_emu_input = self._make_btn(
+                "🛡️ Real-Input: Gesperrt (View-Only)", "#334155", "#475569", self.toggle_emulation_real_input
+            )
+            emu_layout.addWidget(self.btn_emu_input)
+
+            emu_layout.addStretch(1)
+
+            if self.web_url:
+                emu_layout.addWidget(self._make_btn(
+                    "🌐 Web-Viewer im Browser", "#4f46e5", "#6366f1", self.open_web_viewer
+                ))
+
+            root_layout.addWidget(self.emu_bar)
+            self._refresh_emulation_bar()
+
         self.canvas = VideoCanvas(self)
         root_layout.addWidget(self.canvas, 1)
+
+    def _refresh_emulation_bar(self):
+        if not self.emulate:
+            return
+        if self.emu_source_mode == "virtual":
+            self.btn_emu_source.setText("🎭 Quelle: Virtuelle Sandbox (Wechseln → Echter Desktop)")
+            self.btn_emu_source.setStyleSheet(
+                "QPushButton { background-color: #0284c7; color: #fff; border: none; border-radius: 4px; padding: 3px 10px; font-size: 11px; font-weight: 600; }"
+                "QPushButton:hover { background-color: #0ea5e9; }"
+            )
+            self.btn_emu_input.setVisible(False)
+        else:
+            self.btn_emu_source.setText("🖥️ Quelle: Echter Desktop (Anti-Spiegel aktiv, Wechseln → Sandbox)")
+            self.btn_emu_source.setStyleSheet(
+                "QPushButton { background-color: #059669; color: #fff; border: none; border-radius: 4px; padding: 3px 10px; font-size: 11px; font-weight: 600; }"
+                "QPushButton:hover { background-color: #10b981; }"
+            )
+            self.btn_emu_input.setVisible(True)
+            if self.emu_allow_real_input:
+                self.btn_emu_input.setText("⚠️ Real-Input: AKTIV (steuert echte Maus/Tastatur)")
+                self.btn_emu_input.setStyleSheet(
+                    "QPushButton { background-color: #dc2626; color: #fff; border: none; border-radius: 4px; padding: 3px 10px; font-size: 11px; font-weight: 600; }"
+                    "QPushButton:hover { background-color: #ef4444; }"
+                )
+            else:
+                self.btn_emu_input.setText("🛡️ Real-Input: Gesperrt (View-Only)")
+                self.btn_emu_input.setStyleSheet(
+                    "QPushButton { background-color: #334155; color: #fff; border: none; border-radius: 4px; padding: 3px 10px; font-size: 11px; font-weight: 600; }"
+                    "QPushButton:hover { background-color: #475569; }"
+                )
+
+    def toggle_emulation_source(self):
+        if not (self.loop and self.loop.is_running()):
+            return
+        next_mode = "desktop" if self.emu_source_mode == "virtual" else "virtual"
+        self.emu_source_mode = next_mode
+        self._refresh_emulation_bar()
+        msg = json.dumps({"type": "set_emulation_source", "mode": next_mode})
+        asyncio.run_coroutine_threadsafe(self._ws_send(msg), self.loop)
+
+    def toggle_emulation_real_input(self):
+        if not (self.loop and self.loop.is_running()):
+            return
+        next_val = not self.emu_allow_real_input
+        self.emu_allow_real_input = next_val
+        self._refresh_emulation_bar()
+        msg = json.dumps({"type": "set_emulation_input", "enabled": next_val})
+        asyncio.run_coroutine_threadsafe(self._ws_send(msg), self.loop)
+
+    def open_web_viewer(self):
+        if self.web_url:
+            import webbrowser
+            webbrowser.open(self.web_url)
 
     def take_debug_snapshot(self):
         try:
@@ -355,6 +457,9 @@ class RemoteDesktopViewer(QWidget):
             self.status_sig.emit(f"Profile active: Quality {quality}%, Scale {int(scale*100)}%")
 
     def send_input(self, data):
+        if self.emulate and self.emu_source_mode == "desktop" and not self.emu_allow_real_input:
+            if data.get("event") not in ("request_keyframe", "debug_snapshot", "reload_vision", "toggle_debug"):
+                return
         if self.loop and self.loop.is_running():
             msg = json.dumps({"type": "input", "data": data})
             asyncio.run_coroutine_threadsafe(self._ws_send(msg), self.loop)
@@ -434,6 +539,12 @@ class RemoteDesktopViewer(QWidget):
             if msg_type == "screen_info":
                 self.remote_width = meta.get("width", 1920)
                 self.remote_height = meta.get("height", 1080)
+                if self.emulate:
+                    if "source_mode" in meta:
+                        self.emu_source_mode = meta["source_mode"]
+                    if "allow_real_input" in meta:
+                        self.emu_allow_real_input = bool(meta["allow_real_input"])
+                    self.emu_state_sig.emit()
                 if from_signaling and not self.p2p_upgrading and self.p2p_ws is None and self.webrtc_channel is None:
                     endpoints = meta.get("p2p_endpoints", [])
                     token = meta.get("p2p_token", "")
@@ -682,6 +793,11 @@ class RemoteDesktopViewer(QWidget):
         if self.loop and self.loop.is_running():
             try:
                 asyncio.run_coroutine_threadsafe(self._shutdown_connections(), self.loop)
+            except Exception:
+                pass
+        if self.on_close_callback:
+            try:
+                self.on_close_callback()
             except Exception:
                 pass
         super().closeEvent(event)
