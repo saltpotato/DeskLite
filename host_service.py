@@ -193,7 +193,8 @@ class HostService:
                     port,
                     max_size=20 * 1024 * 1024,
                     ping_interval=20,
-                    ping_timeout=40
+                    ping_timeout=40,
+                    compression=None
                 )
                 self.p2p_port = port
                 logging.info(f"Direct P2P listener active on {bind_host}:{port}")
@@ -596,7 +597,8 @@ class HostService:
             self.relay_url,
             max_size=20 * 1024 * 1024,
             ping_interval=20,
-            ping_timeout=40
+            ping_timeout=40,
+            compression=None
         ) as ws:
             self.current_ws = ws
             reg_payload = {

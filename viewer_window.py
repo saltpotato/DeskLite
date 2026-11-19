@@ -574,7 +574,7 @@ class RemoteDesktopViewer(QWidget):
                     break
                 try:
                     p2p_sock = await asyncio.wait_for(
-                        websockets.connect(ep, max_size=20 * 1024 * 1024, ping_interval=20, ping_timeout=40),
+                        websockets.connect(ep, max_size=20 * 1024 * 1024, ping_interval=20, ping_timeout=40, compression=None),
                         timeout=0.75
                     )
                     await p2p_sock.send(json.dumps({"action": "p2p_auth", "token": token}))
@@ -672,7 +672,8 @@ class RemoteDesktopViewer(QWidget):
                 self.relay_url,
                 max_size=20 * 1024 * 1024,
                 ping_interval=20,
-                ping_timeout=40
+                ping_timeout=40,
+                compression=None
             ) as ws:
                 self.ws = ws
                 req = {

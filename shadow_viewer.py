@@ -71,19 +71,31 @@ class ShadowViewer:
         return raw[:, :w * 4].reshape(h, w, 4)
 
     @staticmethod
-    def _difference_mask(left, right, thresh: int = 0):
+    def _absdiff_u8(left, right):
         if left.shape[:2] != right.shape[:2]:
             return None
         if left.size == 0:
-            return np.zeros(left.shape[:2], dtype=bool)
+            return np.zeros((0, 0, 3), dtype=np.uint8)
         if left.shape[2] == 4 and right.shape[2] == 3:
             left = left[:, :, :3]
         elif left.shape[2] != right.shape[2]:
             return None
-        diff = cv2.absdiff(left, right)
+        return cv2.absdiff(left, right)
+
+    @staticmethod
+    def _bad_u8_from_diff(diff, thresh: int = 0):
+        if diff.size == 0:
+            return np.zeros(diff.shape[:2], dtype=np.uint8)
         if diff.shape[2] >= 4:
-            return cv2.inRange(diff, (0, 0, 0, 0), (thresh, thresh, thresh, 255)) == 0
-        return cv2.inRange(diff, (0, 0, 0), (thresh, thresh, thresh)) == 0
+            return cv2.bitwise_not(cv2.inRange(diff, (0, 0, 0, 0), (thresh, thresh, thresh, 255)))
+        return cv2.bitwise_not(cv2.inRange(diff, (0, 0, 0), (thresh, thresh, thresh)))
+
+    @staticmethod
+    def _difference_mask(left, right, thresh: int = 0):
+        diff = ShadowViewer._absdiff_u8(left, right)
+        if diff is None:
+            return None
+        return ShadowViewer._bad_u8_from_diff(diff, thresh=thresh) != 0
 
     @staticmethod
     def _packet_uses_prediction(packet: bytes) -> bool:
@@ -150,7 +162,8 @@ class ShadowViewer:
                     return None
                 self._pending_settle_ts = 0.0
             pixels = self._pixel_view()
-            if not np.any(self._difference_mask(pixels, target, thresh=0)):
+            idle_diff = self._absdiff_u8(pixels, target)
+            if idle_diff is not None and cv2.countNonZero(self._bad_u8_from_diff(idle_diff, thresh=0)) == 0:
                 return None
             del pixels
             self._pixel_image = None
@@ -168,24 +181,25 @@ class ShadowViewer:
         reconstructed = self._pixel_view()
 
         use_motion_thresh = self.smart_mode and packet[2] > 0 and not self._packet_uses_prediction(packet)
+        diff = self._absdiff_u8(reconstructed, target)
+        if diff is None:
+            return self._new_keyframe(target)
         if use_motion_thresh:
-            bad = self._difference_mask(reconstructed, target, thresh=self.jpeg_motion_thresh)
-            if not np.any(bad):
-                if np.any(self._difference_mask(reconstructed, target, thresh=0)):
+            bad_u8 = self._bad_u8_from_diff(diff, thresh=self.jpeg_motion_thresh)
+            if cv2.countNonZero(bad_u8) == 0:
+                if cv2.countNonZero(self._bad_u8_from_diff(diff, thresh=0)) > 0:
                     self._pending_settle_ts = time.time()
                 else:
                     self._pending_settle_ts = 0.0
                 return packet
         else:
-            bad = self._difference_mask(reconstructed, target, thresh=0)
-            if not np.any(bad):
+            bad_u8 = self._bad_u8_from_diff(diff, thresh=0)
+            if cv2.countNonZero(bad_u8) == 0:
                 self._pending_settle_ts = 0.0
                 return packet
 
-        ys, xs = np.nonzero(bad)
-        x1, x2 = int(xs.min()), int(xs.max()) + 1
-        y1, y2 = int(ys.min()), int(ys.max()) + 1
-        w, h = x2 - x1, y2 - y1
+        x1, y1, w, h = cv2.boundingRect(bad_u8)
+        x2, y2 = x1 + w, y1 + h
 
         correction = self._png(target[y1:y2, x1:x2])
         cmd = pack_jpeg_patch(x1, y1, w, h, correction)
@@ -200,10 +214,12 @@ class ShadowViewer:
         self._pixel_image = None
         self.decoder.apply_vf_packet(pack_vf_packet([cmd]), self.canvas)
         # Detect renderer-specific differences rather than assuming PNG draws correctly.
-        if not use_motion_thresh and np.any(self._difference_mask(self._pixel_view(), target, thresh=0)):
+        post_diff = self._absdiff_u8(self._pixel_view(), target)
+        has_post_err = (post_diff is None) or (cv2.countNonZero(self._bad_u8_from_diff(post_diff, thresh=0)) > 0)
+        if not use_motion_thresh and has_post_err:
             logging.warning("Shadow viewer could not reconstruct exact frame; sending keyframe")
             return self._new_keyframe(target)
-        if use_motion_thresh and np.any(self._difference_mask(self._pixel_view(), target, thresh=0)):
+        if use_motion_thresh and has_post_err:
             self._pending_settle_ts = time.time()
         else:
             self._pending_settle_ts = 0.0

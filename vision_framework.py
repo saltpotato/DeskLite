@@ -55,13 +55,40 @@ except ImportError:
     HAS_CV2 = False
 
 
+_KERNEL_3X3 = np.ones((3, 3), dtype=np.uint8)
+_KERNEL_4X4 = np.ones((4, 4), dtype=np.uint8)
+
+
+def _absdiff_mask(a: np.ndarray, b: np.ndarray, thresh: int) -> np.ndarray:
+    """Fast uint8 pixel-difference mask (`True` where max RGB channel diff > thresh)."""
+    if HAS_CV2:
+        diff = cv2.absdiff(a, b)
+        if diff.shape[2] >= 4:
+            return cv2.inRange(diff, (0, 0, 0, 0), (thresh, thresh, thresh, 255)) == 0
+        return cv2.inRange(diff, (0, 0, 0), (thresh, thresh, thresh)) == 0
+    return np.abs(a[:, :, :3].astype(np.int16) - b[:, :, :3].astype(np.int16)).max(axis=2) > thresh
+
+
+def _inlier_ratio_u8(a: np.ndarray, b: np.ndarray, thresh: int) -> float:
+    """Fast uint8 fraction of pixels where all RGB channels differ by <= thresh."""
+    if HAS_CV2:
+        diff = cv2.absdiff(a, b)
+        if diff.shape[2] >= 4:
+            ok = cv2.inRange(diff, (0, 0, 0, 0), (thresh, thresh, thresh, 255))
+        else:
+            ok = cv2.inRange(diff, (0, 0, 0), (thresh, thresh, thresh))
+        return cv2.countNonZero(ok) / max(1, ok.size)
+    diff_max = np.abs(a[:, :, :3].astype(np.int16) - b[:, :, :3].astype(np.int16)).max(axis=2)
+    return float((diff_max <= thresh).mean())
+
+
 def fast_region_hash(arr: np.ndarray, x: int = 0, y: int = 0) -> int:
     """Computes an exact, collision-resistant 64-bit fingerprint of a 3D BGR/BGRA numpy region.
     Never subsamples pixels so 1-pixel font glyphs, serifs, and cursors are never corrupted."""
     h, w = arr.shape[:2]
     if h < 4 or w < 4:
         return 0
-    buf = np.ascontiguousarray(arr[:, :, :3])
+    buf = arr if arr.flags["C_CONTIGUOUS"] else np.ascontiguousarray(arr)
     c1 = zlib.adler32(buf.data) & 0xFFFFFFFF
     c2 = zlib.crc32(buf.data) & 0xFFFFFFFF
     geom_mix = ((int(x) & 0xFFF) << 20) | ((int(y) & 0xFFF) << 8) | ((int(w) & 0xF) << 4) | (int(h) & 0xF)
@@ -133,6 +160,9 @@ class StateCacheRecognizer(BaseRecognizer):
         x, y, w, h = ctx.dirty_rect
         # Never cache small dynamic text/cursor rects (they encode in <0.2ms as sharp ~200B JPEGs)
         if w < 64 or h < 32:
+            return None
+        # Skip hashing huge multi-megabyte regions during active window drags
+        if w * h > 250000 and (time.time() - ctx.shared.get("last_window_move_ts", 0.0)) < 0.25:
             return None
 
         prev_roi = ctx.prev_frame[y:y + h, x:x + w]
@@ -331,10 +361,22 @@ class BackgroundRestoreRecognizer(BaseRecognizer):
         if curr_roi.shape != bg_roi.shape:
             return None
 
-        # Compare curr_roi against bg_roi on 2x2 grid (fast SIMD diff)
-        diff = np.abs(curr_roi[::2, ::2, :3].astype(np.int16) - bg_roi[::2, ::2, :3].astype(np.int16)).max(axis=2)
-        inlier_ratio = float((diff <= 6).mean())
-        mean_diff = float(diff.mean())
+        # Compare curr_roi against bg_roi on 2x2 grid (fast uint8 OpenCV SIMD diff)
+        if HAS_CV2:
+            diff_u8 = cv2.absdiff(curr_roi[::2, ::2], bg_roi[::2, ::2])
+            if diff_u8.shape[2] >= 4:
+                ok_mask = cv2.inRange(diff_u8, (0, 0, 0, 0), (6, 6, 6, 255))
+                inlier_ratio = cv2.countNonZero(ok_mask) / max(1, ok_mask.size)
+                mean_diff = float(cv2.mean(diff_u8)[:3][0] + cv2.mean(diff_u8)[:3][1] + cv2.mean(diff_u8)[:3][2]) / 3.0 if inlier_ratio >= 0.93 else 99.0
+            else:
+                ok_mask = cv2.inRange(diff_u8, (0, 0, 0), (6, 6, 6))
+                inlier_ratio = cv2.countNonZero(ok_mask) / max(1, ok_mask.size)
+                m = cv2.mean(diff_u8) if inlier_ratio >= 0.93 else (99.0, 99.0, 99.0)
+                mean_diff = float(m[0] + m[1] + m[2]) / 3.0
+        else:
+            diff = np.abs(curr_roi[::2, ::2, :3].astype(np.int16) - bg_roi[::2, ::2, :3].astype(np.int16)).max(axis=2)
+            inlier_ratio = float((diff <= 6).mean())
+            mean_diff = float(diff.mean())
 
         # If >= 93% of pixels match background within 6 RGB units and mean difference is tiny (<= 3.0 RGB)
         if inlier_ratio >= 0.93 and mean_diff <= 3.0:
@@ -519,6 +561,7 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
 
             # Sync prev_frame to curr_frame inside the scroll viewport so sub-threshold AA differences
             # never accumulate across consecutive scroll frames or pollute subsequent mouse hovers!
+            ctx.shared["last_window_move_ts"] = time.time()
             ctx.prev_frame[y:y + h, x:x + w] = ctx.curr_frame[y:y + h, x:x + w]
 
             est_saved = max(512, int(inner_w * overlap_h * 0.10))
@@ -582,6 +625,7 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
                 res_patch = ctx.curr_frame[ry:ry + rh, rx:rx + rw]
                 cmds.append(pack_jpeg_patch(rx, ry, rw, rh, ctx.encode_jpeg(res_patch, ctx.quality)))
 
+            ctx.shared["last_window_move_ts"] = time.time()
             ctx.prev_frame[y:y + h, x:x + w] = ctx.curr_frame[y:y + h, x:x + w]
 
             est_saved = max(512, int(overlap_w * h * 0.10))
@@ -720,16 +764,21 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
         if oh < 4 or ow < 4:
             return []
 
-        # Full 1:1 pixel resolution difference via SIMD-vectorized OpenCV (~2.5ms on 1080p)
+        # Full 1:1 pixel resolution difference via SIMD-vectorized OpenCV (zero int16/slice copies)
         if HAS_CV2:
-            diff = cv2.absdiff(shifted[:, :, :3], target[:, :, :3])
-            bad = (diff[:, :, 0] > diff_thresh) | (diff[:, :, 1] > diff_thresh) | (diff[:, :, 2] > diff_thresh)
+            diff = cv2.absdiff(shifted, target)
+            if diff.shape[2] >= 4:
+                bad_u8 = cv2.bitwise_not(cv2.inRange(diff, (0, 0, 0, 0), (diff_thresh, diff_thresh, diff_thresh, 255)))
+            else:
+                bad_u8 = cv2.bitwise_not(cv2.inRange(diff, (0, 0, 0), (diff_thresh, diff_thresh, diff_thresh)))
+            bad_count = cv2.countNonZero(bad_u8)
+            total_cells = bad_u8.size
         else:
             diff = np.abs(shifted[:, :, :3].astype(np.int16) - target[:, :, :3].astype(np.int16)).max(axis=2)
-            bad = diff > diff_thresh
+            bad_u8 = (diff > diff_thresh).astype(np.uint8)
+            bad_count = int(np.count_nonzero(bad_u8))
+            total_cells = bad_u8.size
 
-        bad_count = int(bad.sum())
-        total_cells = bad.size
         bad_ratio = bad_count / max(1, total_cells)
 
         if bad_ratio == 0.0:
@@ -738,9 +787,9 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
             return None
 
         rects = []
-        if HAS_CV2 and bad.shape[0] >= 3 and bad.shape[1] >= 3:
+        if HAS_CV2 and bad_u8.shape[0] >= 3 and bad_u8.shape[1] >= 3:
             # 3x3 dilation bridges 1px anti-aliasing gaps so letters and cursors become clean rectangles
-            dil = cv2.dilate(bad.astype(np.uint8), np.ones((3, 3), dtype=np.uint8))
+            dil = cv2.dilate(bad_u8, _KERNEL_3X3)
             num_l, _, stats, _ = cv2.connectedComponentsWithStats(dil, connectivity=8)
 
             if num_l > max_islands:
@@ -922,8 +971,7 @@ class Scroll2DAndSliderRecognizer(BaseRecognizer):
 
         if a.size == 0 or a.shape != b.shape:
             return False, 0.0
-        diff_max = np.abs(a.astype(np.int16) - b.astype(np.int16)).max(axis=2)
-        inlier_ratio = float((diff_max <= 8).mean())
+        inlier_ratio = _inlier_ratio_u8(a, b, 8)
         return inlier_ratio >= 0.85, inlier_ratio
 
     @staticmethod
@@ -973,8 +1021,7 @@ class WindowMove2DRecognizer(BaseRecognizer):
         shifted = prev_roi[src_y - y : src_y - y + win_h, src_x - x : src_x - x + win_w]
         target = curr_roi[dst_y - y : dst_y - y + win_h, dst_x - x : dst_x - x + win_w]
 
-        diff_4 = np.abs(shifted[::4, ::4, :3].astype(np.int16) - target[::4, ::4, :3].astype(np.int16)).max(axis=2)
-        inlier_ratio = float((diff_4 <= 8).mean())
+        inlier_ratio = _inlier_ratio_u8(shifted[::4, ::4], target[::4, ::4], 8)
         if inlier_ratio < 0.88:
             return None
 
@@ -1082,6 +1129,7 @@ class WindowMove2DRecognizer(BaseRecognizer):
             res_patch = ctx.curr_frame[ry:ry + rh, rx:rx + rw]
             cmds.append(pack_jpeg_patch(rx, ry, rw, rh, self._encode_patch(ctx, res_patch)))
 
+        ctx.shared["last_window_move_ts"] = time.time()
         ctx.prev_frame[y:y + h, x:x + w] = ctx.curr_frame[y:y + h, x:x + w]
 
         est_saved = max(1024, int(win_w * win_h * 0.12))
@@ -1138,8 +1186,7 @@ class WindowMove2DRecognizer(BaseRecognizer):
         if bg_frame is not None and bg_frame.shape[:2] == ctx.curr_frame.shape[:2]:
             bg_sub = bg_frame[sy:sy + sh, sx:sx + sw]
             if bg_sub.shape == strip_arr.shape:
-                diff = np.abs(strip_arr[::2, ::2, :3].astype(np.int16) - bg_sub[::2, ::2, :3].astype(np.int16)).max(axis=2)
-                if float((diff <= 6).mean()) >= 0.93 and float(diff.mean()) <= 3.2:
+                if _inlier_ratio_u8(strip_arr[::2, ::2], bg_sub[::2, ::2], 6) >= 0.93:
                     ctx.shared["bytes_saved"] += max(512, int(sw * sh * 0.14))
                     return [pack_restore_bg(sx, sy, sw, sh)], "bg"
 
@@ -1190,19 +1237,15 @@ class WindowMove2DRecognizer(BaseRecognizer):
 
             sy1, sy2 = pad_y, h - pad_y
             sx1, sx2 = pad_x, w - pad_x
-            p_sub = prev_roi[sy1:sy2:2, sx1:sx2:2, :3].astype(np.int16)
 
-            best_mv = (base_x, base_y)
-            best_score = 9999.0
-
-            for dy in range(base_y - 2, base_y + 3):
-                for dx in range(base_x - 2, base_x + 3):
-                    c_sub = curr_roi[sy1 + dy : sy2 + dy : 2, sx1 + dx : sx2 + dx : 2, :3].astype(np.int16)
-                    score = float(np.abs(p_sub - c_sub).mean())
-                    if score < best_score:
-                        best_score = score
-                        best_mv = (dx, dy)
-            return best_mv
+            # Fine-tune exact integer shift across 5x5 window in a single C++ SIMD matchTemplate call
+            tmpl = prev_roi[sy1:sy2, sx1:sx2, 1]
+            search = curr_roi[sy1 + base_y - 2 : sy2 + base_y + 2, sx1 + base_x - 2 : sx2 + base_x + 2, 1]
+            if search.shape[0] == tmpl.shape[0] + 4 and search.shape[1] == tmpl.shape[1] + 4:
+                res = cv2.matchTemplate(search, tmpl, cv2.TM_SQDIFF)
+                _, _, min_loc, _ = cv2.minMaxLoc(res)
+                return (base_x - 2 + int(min_loc[0]), base_y - 2 + int(min_loc[1]))
+            return (base_x, base_y)
         except Exception:
             return None
 
@@ -1565,9 +1608,7 @@ class VisionHostPipeline:
         bh = by2 - by1
 
         if bw <= 48 and bh <= 48:
-            sub_p = prev_frame[by1:by2, bx1:bx2, :3]
-            sub_c = curr_frame[by1:by2, bx1:bx2, :3]
-            m = np.abs(sub_p.astype(np.int16) - sub_c.astype(np.int16)).max(axis=2) > thresh
+            m = _absdiff_mask(prev_frame[by1:by2, bx1:bx2], curr_frame[by1:by2, bx1:bx2], thresh)
             ys, xs = np.nonzero(m)
             if ys.size == 0:
                 return (int(rx1), int(ry1), max(8, int(rx2 - rx1)), max(8, int(ry2 - ry1)))
@@ -1598,30 +1639,22 @@ class VisionHostPipeline:
 
         # Fast 4-border refinement (<0.01ms): inspects only narrow strips around the 4 coarse grid boundaries
         t_end = min(fh, by1 + 10)
-        top_p = prev_frame[by1:t_end, bx1:bx2, :3]
-        top_c = curr_frame[by1:t_end, bx1:bx2, :3]
-        top_diff = np.abs(top_p.astype(np.int16) - top_c.astype(np.int16)).max(axis=2) > thresh
+        top_diff = _absdiff_mask(prev_frame[by1:t_end, bx1:bx2], curr_frame[by1:t_end, bx1:bx2], thresh)
         t_ys, _ = np.nonzero(top_diff)
         y1 = by1 + int(t_ys.min()) if t_ys.size > 0 else ry1
 
         b_start = max(0, by2 - 10)
-        bot_p = prev_frame[b_start:by2, bx1:bx2, :3]
-        bot_c = curr_frame[b_start:by2, bx1:bx2, :3]
-        bot_diff = np.abs(bot_p.astype(np.int16) - bot_c.astype(np.int16)).max(axis=2) > thresh
+        bot_diff = _absdiff_mask(prev_frame[b_start:by2, bx1:bx2], curr_frame[b_start:by2, bx1:bx2], thresh)
         b_ys, _ = np.nonzero(bot_diff)
         y2 = b_start + int(b_ys.max()) + 1 if b_ys.size > 0 else ry2
 
         l_end = min(fw, bx1 + 10)
-        left_p = prev_frame[by1:by2, bx1:l_end, :3]
-        left_c = curr_frame[by1:by2, bx1:l_end, :3]
-        left_diff = np.abs(left_p.astype(np.int16) - left_c.astype(np.int16)).max(axis=2) > thresh
+        left_diff = _absdiff_mask(prev_frame[by1:by2, bx1:l_end], curr_frame[by1:by2, bx1:l_end], thresh)
         _, l_xs = np.nonzero(left_diff)
         x1 = bx1 + int(l_xs.min()) if l_xs.size > 0 else rx1
 
         r_start = max(0, bx2 - 10)
-        right_p = prev_frame[by1:by2, r_start:bx2, :3]
-        right_c = curr_frame[by1:by2, r_start:bx2, :3]
-        right_diff = np.abs(right_p.astype(np.int16) - right_c.astype(np.int16)).max(axis=2) > thresh
+        right_diff = _absdiff_mask(prev_frame[by1:by2, r_start:bx2], curr_frame[by1:by2, r_start:bx2], thresh)
         _, r_xs = np.nonzero(right_diff)
         x2 = r_start + int(r_xs.max()) + 1 if r_xs.size > 0 else rx2
 

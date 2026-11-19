@@ -208,6 +208,7 @@ class LocalRelayServer:
                     max_size=25 * 1024 * 1024,
                     ping_interval=20,
                     ping_timeout=40,
+                    compression=None,
                 )
                 sock = next(iter(self._server.sockets), None)
                 self.port = sock.getsockname()[1] if sock else p
