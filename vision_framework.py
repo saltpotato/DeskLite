@@ -1124,7 +1124,19 @@ class WindowMove2DRecognizer(BaseRecognizer):
                 elif kind == "cache":
                     cache_hits += 1
 
-        # 4) Patch rounded window corners / shadows / stationary cursor inside overlap
+        # 4) Translate any AnimationCycle hotspots inside the moved window and resolve their residuals from RAM cache
+        moved_hotspots = AnimationCycleRecognizer.translate_hotspots(
+            ctx.shared, src_x, src_y, win_w, win_h, mv_x, mv_y,
+            ctx.curr_frame.shape[1], ctx.curr_frame.shape[0]
+        )
+        if moved_hotspots and residual_rects:
+            anim_cmds, residual_rects, anim_hits = AnimationCycleRecognizer.resolve_drag_residuals(
+                ctx, moved_hotspots, residual_rects
+            )
+            cmds.extend(anim_cmds)
+            cache_hits += anim_hits
+
+        # 5) Patch remaining rounded window corners / shadows / stationary cursor inside overlap
         for rx, ry, rw, rh in residual_rects:
             res_patch = ctx.curr_frame[ry:ry + rh, rx:rx + rw]
             cmds.append(pack_jpeg_patch(rx, ry, rw, rh, self._encode_patch(ctx, res_patch)))
@@ -1264,6 +1276,100 @@ class AnimationCycleRecognizer(BaseRecognizer):
     """
     name = "AnimationCycleRecognizer"
 
+    @staticmethod
+    def translate_hotspots(shared: dict, src_x: int, src_y: int, win_w: int, win_h: int,
+                           mv_x: int, mv_y: int, fw: int, fh: int) -> list:
+        """Shifts tracked animation hotspots that live inside a dragged window so their
+        Viewer RAM cache entries remain valid at the new screen coordinates (0 re-learning)."""
+        hotspots = shared.get("anim_hotspots")
+        if not hotspots:
+            return []
+        known = shared.get("known_states")
+        now = time.time()
+        moved = []
+        for hs in hotspots:
+            hx, hy, hw, hh = hs["rect"]
+            if (hx >= src_x - 4 and hy >= src_y - 4
+                    and hx + hw <= src_x + win_w + 4 and hy + hh <= src_y + win_h + 4):
+                nx, ny = hx + mv_x, hy + mv_y
+                if 0 <= nx and 0 <= ny and nx + hw <= fw and ny + hh <= fh:
+                    old_rect = (hx, hy, hw, hh)
+                    new_rect = (nx, ny, hw, hh)
+                    hs["rect"] = [nx, ny, hw, hh]
+                    hs["last_ts"] = now
+                    new_kfs = []
+                    for entry in hs.get("keyframes", []):
+                        khash = entry[0]
+                        if known is not None and khash in known and known[khash] == old_rect:
+                            known[khash] = new_rect
+                        if len(entry) == 5:
+                            new_kfs.append((khash, new_rect, entry[2], entry[3], entry[4]))
+                        else:
+                            new_kfs.append((khash, new_rect, entry[2], entry[3]))
+                    hs["keyframes"] = new_kfs
+                    moved.append(hs)
+        return moved
+
+    @staticmethod
+    def resolve_drag_residuals(ctx: FrameContext, moved_hotspots: list,
+                               residual_rects: list) -> tuple[list[bytes], list, int]:
+        """Replays cached animation keyframes directly over residuals inside moved hotspots
+        during a window drag (CMD_RESTORE_STATE, 0 KB) instead of sending residual JPEGs."""
+        known = ctx.shared["known_states"]
+        dirty_set = ctx.shared["dirty_states"]
+        shadow_repair_active = bool(ctx.shared.get("shadow_repair_active", False))
+
+        anim_cmds = []
+        remaining = list(residual_rects)
+        hits = 0
+
+        for hs in moved_hotspots:
+            kfs = hs.get("keyframes")
+            if not kfs:
+                continue
+            ux, uy, uw, uh = hs["rect"]
+            covered = [
+                r for r in remaining
+                if r[0] >= ux - 2 and r[1] >= uy - 2
+                and r[0] + r[2] <= ux + uw + 2 and r[1] + r[3] <= uy + uh + 2
+            ]
+            if not covered:
+                continue
+
+            curr_u = ctx.curr_frame[uy:uy + uh, ux:ux + uw]
+            best_hash = None
+            for entry in kfs:
+                if len(entry) < 5 or entry[4] is None:
+                    continue
+                khash, _, _, _, kroi = entry
+                if khash not in known or khash in dirty_set or kroi.shape[:2] != (uh, uw):
+                    continue
+                if shadow_repair_active:
+                    if not np.any(_absdiff_mask(curr_u, kroi, 0)):
+                        best_hash = khash
+                        break
+                else:
+                    if _inlier_ratio_u8(curr_u, kroi, 8) >= 0.92:
+                        best_hash = khash
+                        break
+
+            if best_hash is not None:
+                anim_cmds.append(pack_restore_state(best_hash, ux, uy, uw, uh))
+                known.move_to_end(best_hash)
+                hs["last_hit_hash"] = best_hash
+                est_saved = max(512, int(uw * uh * 0.14))
+                ctx.shared["bytes_saved"] += est_saved
+                anim_cmds.append(pack_overlay_meta({
+                    "event": "anim_cycle",
+                    "rect": [ux, uy, uw, uh],
+                    "saved_kb": round(ctx.shared["bytes_saved"] / 1024.0, 1)
+                }))
+                covered_set = set(covered)
+                remaining = [r for r in remaining if r not in covered_set]
+                hits += 1
+
+        return anim_cmds, remaining, hits
+
     def on_input_event(self, evt: dict, shared: dict):
         # Only clear animation hotspots that directly intersect a mouse click location
         # so ongoing spinners in browser tabs or background windows are never killed by unrelated input!
@@ -1334,15 +1440,18 @@ class AnimationCycleRecognizer(BaseRecognizer):
 
         # Check if dirty_rect (with 2px anti-aliasing margin) expands the hotspot's canonical union box U
         hx, hy, hw, hh = matched_hs["rect"]
-        px1 = max(0, (int(x) - 2) & ~3)
-        py1 = max(0, (int(y) - 2) & ~3)
-        px2 = min(fw, (int(x + w) + 5) & ~3)
-        py2 = min(fh, (int(y + h) + 5) & ~3)
-        ux1 = min(px1, hx)
-        uy1 = min(py1, hy)
-        ux2 = max(px2, hx + hw)
-        uy2 = max(py2, hy + hh)
-        uw, uh = ux2 - ux1, uy2 - uy1
+        if x >= hx and y >= hy and x + w <= hx + hw and y + h <= hy + hh:
+            ux1, uy1, uw, uh = hx, hy, hw, hh
+        else:
+            px1 = max(0, (int(x) - 2) & ~3)
+            py1 = max(0, (int(y) - 2) & ~3)
+            px2 = min(fw, (int(x + w) + 5) & ~3)
+            py2 = min(fh, (int(y + h) + 5) & ~3)
+            ux1 = min(px1, hx)
+            uy1 = min(py1, hy)
+            ux2 = max(px2, hx + hw)
+            uy2 = max(py2, hy + hh)
+            uw, uh = ux2 - ux1, uy2 - uy1
         is_u_spinner = (uw <= 128 and uh <= 128 and abs(uw - uh) <= 24)
         is_u_bar = (uw <= 256 and uh <= 36 and uw >= 2 * uh)
         if not (is_u_spinner or is_u_bar):

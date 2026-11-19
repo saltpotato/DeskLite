@@ -85,6 +85,82 @@ class AnimationCycleTests(unittest.TestCase):
 
         self.assertGreaterEqual(late_hits, 75)
 
+    def test_animation_loop_survives_window_drag_without_relearning(self):
+        """Dragging a window with an active spinner must keep hitting RAM cache during & after the drag."""
+        import math
+        from shadow_viewer import ShadowViewer
+
+        def render_window_with_spinner(wx, wy, angle_deg):
+            img = np.full((360, 480, 4), (30, 34, 42, 255), dtype=np.uint8)
+            # Subtle desktop grid so 2D translation is unambiguous
+            img[::24, :, :3] = (40, 46, 56)
+            img[:, ::24, :3] = (40, 46, 56)
+            # Window body + title bar + interior UI lines
+            ww, wh = 220, 160
+            cv2.rectangle(img, (wx, wy), (wx + ww, wy + wh), (242, 245, 248, 255), -1)
+            cv2.rectangle(img, (wx, wy), (wx + ww, wy + 26), (52, 84, 132, 255), -1)
+            cv2.rectangle(img, (wx, wy), (wx + ww, wy + wh), (90, 100, 115, 255), 1)
+            cv2.putText(img, "DeskLite App", (wx + 10, wy + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255, 255), 1)
+            cv2.rectangle(img, (wx + 12, wy + 40), (wx + 110, wy + 140), (225, 232, 240, 255), -1)
+            cv2.putText(img, "Status: OK", (wx + 18, wy + 70), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (40, 50, 65, 255), 1)
+            cv2.putText(img, "Frames: 60", (wx + 18, wy + 100), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (40, 50, 65, 255), 1)
+            # 8-phase spinner inside window
+            cx, cy = wx + 150, wy + 90
+            cv2.circle(img, (cx, cy), 18, (220, 226, 234, 255), 3)
+            rad = math.radians(angle_deg)
+            ex = int(round(cx + 15 * math.cos(rad)))
+            ey = int(round(cy + 15 * math.sin(rad)))
+            cv2.line(img, (cx, cy), (ex, ey), (240, 110, 30, 255), 3)
+            return img
+
+        pipeline = VisionHostPipeline()
+        pipeline.shared["debug_mode"] = False
+        pipeline.shared["shadow_repair_active"] = True
+        shadow = ShadowViewer()
+
+        wx, wy = 80, 60
+        # 1) Learn all 8 phases while window is stationary
+        for i in range(24):
+            f = render_window_with_spinner(wx, wy, (i % 8) * 45.0)
+            pkt = pipeline.encode_frame(f, i == 0, ScreenCapturer._encode_jpeg, 75)
+            out = shadow.process(f, pkt)
+            self.assertIsNotNone(out)
+
+        ram_before_drag = len(shadow.decoder.state_cache)
+        repairs_before_drag = shadow.repaired_frames
+
+        # 2) Drag window by odd/diagonal steps while spinner keeps rotating
+        drag_anim_hits = 0
+        for step_idx, (dx, dy) in enumerate([(7, 3), (5, 2), (-6, 3)], start=24):
+            wx += dx
+            wy += dy
+            f = render_window_with_spinner(wx, wy, (step_idx % 8) * 45.0)
+            pkt = pipeline.encode_frame(f, False, ScreenCapturer._encode_jpeg, 75)
+            out = shadow.process(f, pkt)
+            self.assertIsNotNone(out)
+            self.assertIn(b'"window_move"', pkt)
+            if b'"anim_cycle"' in pkt:
+                drag_anim_hits += 1
+            np.testing.assert_array_equal(shadow._pixels(), f[:, :, :3])
+
+        self.assertGreaterEqual(drag_anim_hits, 2)
+
+        # 3) Immediately after dropping at odd coords (86, 68), spinner must hit cache with 0 re-learning
+        post_drag_hits = 0
+        for i in range(27, 35):
+            f = render_window_with_spinner(wx, wy, (i % 8) * 45.0)
+            pkt = pipeline.encode_frame(f, False, ScreenCapturer._encode_jpeg, 75)
+            out = shadow.process(f, pkt)
+            self.assertIsNotNone(out)
+            if pkt and (b'"anim_cycle"' in pkt or b'"bg_restore"' in pkt):
+                post_drag_hits += 1
+            np.testing.assert_array_equal(shadow._pixels(), f[:, :, :3])
+
+        self.assertGreaterEqual(post_drag_hits, 7)
+        self.assertLessEqual(shadow.repaired_frames, repairs_before_drag + 1)
+        self.assertEqual(len(pipeline.shared.get("anim_hotspots", [])), 1)
+        self.assertLessEqual(len(pipeline.shared["anim_hotspots"][0]["keyframes"]), 8)
+
 
 if __name__ == "__main__":
     unittest.main()
