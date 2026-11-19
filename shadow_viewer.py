@@ -201,18 +201,48 @@ class ShadowViewer:
         x1, y1, w, h = cv2.boundingRect(bad_u8)
         x2, y2 = x1 + w, y1 + h
 
-        correction = self._png(target[y1:y2, x1:x2])
-        cmd = pack_jpeg_patch(x1, y1, w, h, correction)
+        # If bad pixels come from 2+ separate controls (e.g. spinner + scroll strip),
+        # emit tight per-island PNG patches instead of one giant spanning rectangle.
+        repair_rects = [(x1, y1, w, h)]
         original_count = packet[2]
-        # One extra command fits in the one-byte compound command count.
+        if w * h > 16000 and original_count <= 247:
+            bad_px = cv2.countNonZero(bad_u8)
+            if w * h > bad_px * 2:
+                dil = cv2.dilate(bad_u8, np.ones((7, 7), dtype=np.uint8))
+                num_l, _, stats, _ = cv2.connectedComponentsWithStats(dil, connectivity=8)
+                if 2 <= num_l - 1 <= 8:
+                    islands = []
+                    sum_area = 0
+                    for lid in range(1, num_l):
+                        ix = int(stats[lid, cv2.CC_STAT_LEFT])
+                        iy = int(stats[lid, cv2.CC_STAT_TOP])
+                        iw = int(stats[lid, cv2.CC_STAT_WIDTH])
+                        ih = int(stats[lid, cv2.CC_STAT_HEIGHT])
+                        # Tighten back to actual bad_u8 pixels inside dilated island
+                        sub_bad = bad_u8[iy:iy + ih, ix:ix + iw]
+                        bx, by, bw, bh = cv2.boundingRect(sub_bad)
+                        if bw > 0 and bh > 0:
+                            islands.append((ix + bx, iy + by, bw, bh))
+                            sum_area += bw * bh
+                    if islands and sum_area < w * h * 0.70 and original_count + len(islands) <= 255:
+                        repair_rects = islands
+
+        total_repair_area = sum(rw * rh for _, _, rw, rh in repair_rects)
         # Large or unrepresentable corrections use a lossless keyframe.
-        if original_count >= 255 or w * h >= width * height * 0.75:
+        if original_count + len(repair_rects) > 255 or total_repair_area >= width * height * 0.75:
             return self._new_keyframe(target)
 
-        corrected = packet[:2] + bytes([original_count + 1]) + packet[3:] + cmd
+        repair_cmds = []
+        repair_bytes = 0
+        for rx, ry, rw, rh in repair_rects:
+            correction = self._png(target[ry:ry + rh, rx:rx + rw])
+            repair_bytes += len(correction)
+            repair_cmds.append(pack_jpeg_patch(rx, ry, rw, rh, correction))
+
+        corrected = packet[:2] + bytes([original_count + len(repair_cmds)]) + packet[3:] + b"".join(repair_cmds)
         del reconstructed
         self._pixel_image = None
-        self.decoder.apply_vf_packet(pack_vf_packet([cmd]), self.canvas)
+        self.decoder.apply_vf_packet(pack_vf_packet(repair_cmds), self.canvas)
         # Detect renderer-specific differences rather than assuming PNG draws correctly.
         post_diff = self._absdiff_u8(self._pixel_view(), target)
         has_post_err = (post_diff is None) or (cv2.countNonZero(self._bad_u8_from_diff(post_diff, thresh=0)) > 0)
@@ -223,6 +253,6 @@ class ShadowViewer:
             self._pending_settle_ts = time.time()
         else:
             self._pending_settle_ts = 0.0
-        self.residual_bytes += len(correction)
+        self.residual_bytes += repair_bytes
         self.repaired_frames += 1
         return corrected

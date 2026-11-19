@@ -117,6 +117,23 @@ class ShadowViewerTests(unittest.TestCase):
         if settled_pkt is not None:
             self.assertTrue(settled_pkt.startswith(b"VF"))
 
+    def test_separate_mismatched_controls_split_into_tight_repair_islands(self):
+        shadow = ShadowViewer()
+        base = np.full((480, 640, 3), 30, dtype=np.uint8)
+        shadow.process(base, b"not-vf")
+
+        target = base.copy()
+        # Two distant 30x30 changed controls (spanning 400x300 = 120,000 px if merged!)
+        target[40:70, 50:80] = (200, 120, 40)
+        target[310:340, 420:450] = (40, 180, 220)
+
+        out = shadow.process(target, pack_vf_packet([]))
+        self.assertIsNotNone(out)
+        self.assertTrue(out.startswith(b"VF"))
+        # Must emit 2 tight repair patches, not 1 giant spanning patch
+        self.assertEqual(out[2], 2)
+        np.testing.assert_array_equal(shadow._pixels(), target)
+
 
 if __name__ == "__main__":
     unittest.main()

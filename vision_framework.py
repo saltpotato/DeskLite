@@ -1885,8 +1885,8 @@ class VisionHostPipeline:
             return None
         self._delta_frames_since_keyframe += 1
 
-        # Step 1: Extract Macro Islands (32px gap bridging keeps scrolling pages & dialogs intact)
-        macro_rects = self._extract_dirty_rects(self.prev_frame, curr_frame, mask, 0, 0, fw, fh, bridge_cells=8, max_rects=8)
+        # Step 1: Extract Macro Islands (28px/side = 56px gap bridging keeps dragged windows intact without merging 60px-apart panels)
+        macro_rects = self._extract_dirty_rects(self.prev_frame, curr_frame, mask, 0, 0, fw, fh, bridge_cells=7, max_rects=8)
         all_cmds = []
         micro_count = 0
 
